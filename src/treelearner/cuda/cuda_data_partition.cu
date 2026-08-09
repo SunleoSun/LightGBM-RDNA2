@@ -996,7 +996,7 @@ void CUDADataPartition::LaunchSplitInnerKernel(
       cuda_leaf_num_data_.RawData(), cuda_data_indices_.RawData(),
       grid_dim_);
   }
-  SynchronizeCUDADevice(__FILE__, __LINE__);
+  SynchronizeCUDAStream(cuda_streams_[0], __FILE__, __LINE__);
   global_timer.Stop("CUDADataPartition::AggregateBlockOffsetKernel");
 
   if (nccl_communicator_ != nullptr) {
@@ -1018,7 +1018,7 @@ void CUDADataPartition::LaunchSplitInnerKernel(
     cuda_block_data_to_left_offset_.RawData(), cuda_block_data_to_right_offset_.RawData(), cuda_block_to_left_offset_.RawData(),
     cuda_out_data_indices_in_leaf_.RawData());
   global_timer.Stop("CUDADataPartition::SplitInnerKernel");
-  SynchronizeCUDADevice(__FILE__, __LINE__);
+  SynchronizeCUDAStream(cuda_streams_[1], __FILE__, __LINE__);
 
   global_timer.Start("CUDADataPartition::SplitTreeStructureKernel");
 
@@ -1055,7 +1055,7 @@ void CUDADataPartition::LaunchSplitInnerKernel(
   const double* cpu_sum_hessians_info = reinterpret_cast<const double*>(cpu_split_info_buffer.data() + 8);
   global_timer.Start("CUDADataPartition::CopyFromCUDADeviceToHostAsync");
   CopyFromCUDADeviceToHostAsync<int>(cpu_split_info_buffer.data(), cuda_split_info_buffer_.RawData(), 18, cuda_streams_[0], __FILE__, __LINE__);
-  SynchronizeCUDADevice(__FILE__, __LINE__);
+  SynchronizeCUDAStream(cuda_streams_[0], __FILE__, __LINE__);
   global_timer.Stop("CUDADataPartition::CopyFromCUDADeviceToHostAsync");
   const data_size_t left_leaf_num_data = cpu_split_info_buffer[1];
   const data_size_t left_leaf_data_start = cpu_split_info_buffer[2];
