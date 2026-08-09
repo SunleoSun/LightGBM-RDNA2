@@ -79,7 +79,7 @@ void CUDAHistogramConstructor::InitFeatureMetaInfo(const Dataset* train_data, co
 void CUDAHistogramConstructor::BeforeTrain(const score_t* gradients, const score_t* hessians) {
   cuda_gradients_ = gradients;
   cuda_hessians_ = hessians;
-  cuda_hist_.SetValue(0);
+  CUDASUCCESS_OR_FATAL(cudaMemsetAsync(cuda_hist_.RawData(), 0, cuda_hist_.Size() * sizeof(hist_t), cuda_stream_));
 }
 
 void CUDAHistogramConstructor::Init(const Dataset* train_data, TrainingShareStates* share_state) {
