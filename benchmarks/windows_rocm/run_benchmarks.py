@@ -186,9 +186,27 @@ def tree_signature(path: Path) -> tuple[int, str, str]:
     return len(starts), exact, structural
 
 
-def compare(results: list[dict], iterations: int, atol: float, rtol: float) -> dict:
+def confusion_matrix(y_true: np.ndarray, hard_pred: np.ndarray) -> dict[str, int]:
+    y = np.asarray(y_true, dtype=np.int8)
+    p = np.asarray(hard_pred, dtype=np.int8)
+    return {
+        "tn": int(np.sum((y == 0) & (p == 0))),
+        "fp": int(np.sum((y == 0) & (p == 1))),
+        "fn": int(np.sum((y == 1) & (p == 0))),
+        "tp": int(np.sum((y == 1) & (p == 1))),
+    }
+
+
+def compare(
+    results: list[dict], iterations: int, y_valid: np.ndarray, atol: float, rtol: float,
+    auc_tol: float, correlation_min: float, threshold: float, min_class_fraction: float,
+    min_confident_fraction: float,
+) -> dict:
     reference = results[0]
     ref_pred = np.loadtxt(reference["predictions"], dtype=np.float64)
+    ref_hard = (ref_pred >= threshold).astype(np.int8)
+    ref_confusion = confusion_matrix(y_valid, ref_hard)
+    ref_auc = auc_score(y_valid, ref_pred)
     ref_trees, ref_exact, ref_struct = tree_signature(Path(reference["model"]))
     if ref_trees != iterations:
         raise RuntimeError(f"reference model has {ref_trees} trees, expected {iterations}")
@@ -199,22 +217,65 @@ def compare(results: list[dict], iterations: int, atol: float, rtol: float) -> d
         if pred.shape != ref_pred.shape:
             raise RuntimeError(f"prediction shape mismatch for {item['name']}: {pred.shape} vs {ref_pred.shape}")
         finite = bool(np.isfinite(pred).all())
-        nonzero = bool(np.any(np.abs(pred) > 0.0) and np.std(pred) > 0.0)
+        probabilities = bool(np.all((pred >= 0.0) & (pred <= 1.0)))
+        nonconstant = bool(np.std(pred) > 0.0)
         allclose = bool(np.allclose(pred, ref_pred, atol=atol, rtol=rtol))
         max_abs = float(np.max(np.abs(pred - ref_pred)))
         mean_abs = float(np.mean(np.abs(pred - ref_pred)))
+        hard = (pred >= threshold).astype(np.int8)
+        hard_match = bool(np.array_equal(hard, ref_hard))
+        predicted_positive = int(hard.sum())
+        predicted_negative = int(len(hard) - predicted_positive)
+        smallest_class_fraction = min(predicted_positive, predicted_negative) / len(hard)
+        confident_low = int(np.sum(pred < 0.1))
+        confident_high = int(np.sum(pred > 0.9))
+        confident_fraction = min(confident_low, confident_high) / len(pred)
+        confusion = confusion_matrix(y_valid, hard)
+        confusion_match = confusion == ref_confusion
+        auc = auc_score(y_valid, pred)
+        auc_diff = abs(auc - ref_auc)
+        correlation = float(np.corrcoef(ref_pred, pred)[0, 1])
         trees, exact, structural = tree_signature(Path(item["model"]))
         record = {
-            "name": item["name"], "finite_predictions": finite, "nonzero_predictions": nonzero,
-            "predictions_match_reference": allclose, "prediction_max_abs_diff": max_abs,
-            "prediction_mean_abs_diff": mean_abs, "tree_count": trees,
-            "tree_text_exact_match": exact == ref_exact, "tree_structure_match": structural == ref_struct,
+            "name": item["name"],
+            "finite_predictions": finite,
+            "probabilities_in_unit_interval": probabilities,
+            "nonconstant_predictions": nonconstant,
+            "predictions_match_reference": allclose,
+            "prediction_max_abs_diff": max_abs,
+            "prediction_mean_abs_diff": mean_abs,
+            "pearson_correlation": correlation,
+            "auc": auc,
+            "auc_abs_diff": auc_diff,
+            "classification_threshold": threshold,
+            "hard_labels_match_reference": hard_match,
+            "predicted_positive": predicted_positive,
+            "predicted_negative": predicted_negative,
+            "smallest_predicted_class_fraction": smallest_class_fraction,
+            "confident_below_0_1": confident_low,
+            "confident_above_0_9": confident_high,
+            "smallest_confident_tail_fraction": confident_fraction,
+            "confusion_matrix": confusion,
+            "confusion_matrix_matches_reference": confusion_match,
+            "tree_count": trees,
+            "tree_text_exact_match": exact == ref_exact,
+            "tree_structure_match": structural == ref_struct,
         }
         comparisons.append(record)
-        if not finite or not nonzero or trees != iterations or not allclose or structural != ref_struct:
+        failed = (
+            not finite or not probabilities or not nonconstant or trees != iterations
+            or not allclose or structural != ref_struct or not hard_match or not confusion_match
+            or auc_diff > auc_tol or correlation < correlation_min
+            or smallest_class_fraction < min_class_fraction
+            or confident_fraction < min_confident_fraction
+        )
+        if failed:
             failures.append(record)
     return {
         "reference": reference["name"], "atol": atol, "rtol": rtol,
+        "auc_tol": auc_tol, "correlation_min": correlation_min,
+        "classification_threshold": threshold, "min_class_fraction": min_class_fraction,
+        "min_confident_fraction": min_confident_fraction, "reference_confusion_matrix": ref_confusion,
         "all_checks_passed": not failures, "comparisons": comparisons, "failures": failures,
     }
 
@@ -227,6 +288,11 @@ def main() -> int:
     p.add_argument("--iterations", type=int, default=100)
     p.add_argument("--atol", type=float, default=1e-6)
     p.add_argument("--rtol", type=float, default=1e-6)
+    p.add_argument("--auc-tol", type=float, default=1e-8)
+    p.add_argument("--correlation-min", type=float, default=0.99999999)
+    p.add_argument("--classification-threshold", type=float, default=0.5)
+    p.add_argument("--min-class-fraction", type=float, default=0.05)
+    p.add_argument("--min-confident-fraction", type=float, default=0.05)
     args = p.parse_args()
 
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
@@ -248,7 +314,12 @@ def main() -> int:
         run_capi_variant("v470_cpu", required["cpu"], "cpu", train_binary, valid_npz, args.iterations),
         run_rocm_cli("v470_rocm_gpu", required["rocm_exe"], train_binary, valid_features_file, valid_npz, args.iterations),
     ]
-    comparison = compare(results, args.iterations, args.atol, args.rtol)
+    y_valid = np.load(valid_npz)["y"]
+    comparison = compare(
+        results, args.iterations, y_valid, args.atol, args.rtol, args.auc_tol,
+        args.correlation_min, args.classification_threshold, args.min_class_fraction,
+        args.min_confident_fraction,
+    )
     report = {
         "config": {
             "objective": "binary", "metric": "auc", "n_estimators": args.iterations,
