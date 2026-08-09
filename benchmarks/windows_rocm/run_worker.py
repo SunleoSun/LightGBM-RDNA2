@@ -86,10 +86,10 @@ def main() -> int:
         "objective=binary metric=auc learning_rate=0.05 num_leaves=4 max_depth=8 "
         "min_data_in_leaf=20 max_bin=255 feature_fraction=1.0 bagging_fraction=1.0 bagging_freq=0 "
         "verbosity=-1 seed=20260809 feature_fraction_seed=20260809 bagging_seed=20260809 "
-        "data_random_seed=20260809 deterministic=true"
+        "data_random_seed=20260809 deterministic=true force_col_wise=true"
     )
     if args.device == "cpu":
-        device_params = "device_type=cpu force_col_wise=true"
+        device_params = "device_type=cpu"
     else:
         device_params = "device_type=gpu gpu_use_dp=false gpu_platform_id=-1 gpu_device_id=-1"
     params = f"{common} {device_params}".encode()

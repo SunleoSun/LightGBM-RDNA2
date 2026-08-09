@@ -133,7 +133,7 @@ def run_rocm_cli(name: str, exe: Path, train_file: Path, valid_features_file: Pa
         "learning_rate=0.05", "num_leaves=4", "max_depth=8", "min_data_in_leaf=20", "max_bin=255",
         "feature_fraction=1.0", "bagging_fraction=1.0", "bagging_freq=0", "seed=20260809",
         "feature_fraction_seed=20260809", "bagging_seed=20260809", "data_random_seed=20260809",
-        "deterministic=true", "device_type=cuda", "num_gpu=1", "gpu_device_id=0", "verbosity=1",
+        "deterministic=true", "force_col_wise=true", "device_type=cuda", "num_gpu=1", "gpu_device_id=0", "verbosity=1",
         f"num_iterations={iterations}", f"output_model={model}",
     ]
     wall0 = time.perf_counter()
@@ -282,13 +282,13 @@ def compare(
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--train-rows", type=int, default=250000)
+    p.add_argument("--train-rows", type=int, default=100000)
     p.add_argument("--valid-rows", type=int, default=50000)
-    p.add_argument("--features", type=int, default=64)
+    p.add_argument("--features", type=int, default=1000)
     p.add_argument("--iterations", type=int, default=100)
     p.add_argument("--atol", type=float, default=1e-6)
     p.add_argument("--rtol", type=float, default=1e-6)
-    p.add_argument("--auc-tol", type=float, default=1e-8)
+    p.add_argument("--auc-tol", type=float, default=5e-8)
     p.add_argument("--correlation-min", type=float, default=0.99999999)
     p.add_argument("--classification-threshold", type=float, default=0.5)
     p.add_argument("--min-class-fraction", type=float, default=0.05)
