@@ -328,9 +328,8 @@ void CUDALeafSplits::LaunchInitValuesKernel(
       cuda_gradients_, cuda_hessians_, num_used_indices, cuda_bagging_data_indices, cuda_sum_of_gradients_buffer_.RawData(),
       cuda_sum_of_hessians_buffer_.RawData());
   }
-  SynchronizeCUDADevice(__FILE__, __LINE__);
-
   if (nccl_communicator_ != nullptr) {
+    SynchronizeCUDADevice(__FILE__, __LINE__);
     ReduceGradKernel<<<1, NUM_THREADS_PER_BLOCK_LEAF_SPLITS>>>(num_blocks_init_from_gradients_, cuda_sum_of_gradients_buffer_.RawData(),
       cuda_sum_of_hessians_buffer_.RawData(), num_used_indices);
     SynchronizeCUDADevice(__FILE__, __LINE__);
@@ -355,7 +354,6 @@ void CUDALeafSplits::LaunchInitValuesKernel(
       cuda_hist_in_leaf,
       cuda_struct_.RawData());
   }
-  SynchronizeCUDADevice(__FILE__, __LINE__);
 }
 
 void CUDALeafSplits::LaunchInitValuesKernel(
