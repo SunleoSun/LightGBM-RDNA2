@@ -99,10 +99,11 @@ void CUDAHistogramConstructor::Init(const Dataset* train_data, TrainingShareStat
   CUDASUCCESS_OR_FATAL(cudaGetDeviceProperties(&device_prop, device_index));
   if (std::strncmp(device_prop.gcnArchName, "gfx1030", 7) == 0) {
     min_grid_dim_y_ = 2;
+    num_data_per_thread_ = 1200;
   }
 #ifdef TIMETAG
-  Log::Info("CUDA histogram grid-y minimum: arch=%s min_grid_dim_y=%d",
-            device_prop.gcnArchName, min_grid_dim_y_);
+  Log::Info("CUDA histogram geometry: arch=%s min_grid_dim_y=%d data_per_thread=%d",
+            device_prop.gcnArchName, min_grid_dim_y_, num_data_per_thread_);
 #endif
 #endif
 
@@ -175,7 +176,7 @@ void CUDAHistogramConstructor::CalcConstructHistogramKernelDim(
   *block_dim_y = NUM_THREADS_PER_BLOCK / cuda_row_data_->max_num_column_per_partition();
   *grid_dim_x = cuda_row_data_->num_feature_partitions();
   const int calculated_grid_dim_y =
-    ((num_data_in_smaller_leaf + NUM_DATA_PER_THREAD - 1) / NUM_DATA_PER_THREAD + (*block_dim_y) - 1) / (*block_dim_y);
+    ((num_data_in_smaller_leaf + num_data_per_thread_ - 1) / num_data_per_thread_ + (*block_dim_y) - 1) / (*block_dim_y);
   *grid_dim_y = std::max(min_grid_dim_y_, calculated_grid_dim_y);
 }
 

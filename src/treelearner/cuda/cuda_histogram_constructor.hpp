@@ -153,6 +153,8 @@ class CUDAHistogramConstructor {
   std::vector<uint32_t> need_fix_histogram_features_num_bin_aligend_;
   /*! \brief device-specific minimum number of blocks allowed in the y dimension */
   int min_grid_dim_y_ = 160;
+  /*! \brief target number of data points processed by each histogram thread */
+  int num_data_per_thread_ = NUM_DATA_PER_THREAD;
 
 
   // CUDA memory, held by this object
