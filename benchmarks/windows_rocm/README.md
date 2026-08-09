@@ -7,7 +7,7 @@ This harness builds LightGBM 4.7.0 and runs the same deterministic binary-classi
 3. LightGBM 4.7.0 on CPU;
 4. LightGBM 4.7.0 built with native Windows HIP/ROCm and run with `device_type=cuda`.
 
-The default workload is intentionally wide: 100,000 training rows, 50,000 validation rows, and 1,000 features. It uses `objective=binary`, `metric=auc`, 100 boosting iterations (`n_estimators=100`), `max_depth=8`, `num_leaves=4`, and `force_col_wise=true` in all four modes. The generated dataset and all seeds are deterministic.
+The default workload is intentionally very wide: 40,000 training rows, 50,000 validation rows, and 3,000 features. It uses `objective=binary`, `metric=auc`, 100 boosting iterations (`n_estimators=100`), `max_depth=8`, `num_leaves=4`, and `force_col_wise=true` in all four modes. The generated dataset and all seeds are deterministic.
 
 Run from PowerShell:
 

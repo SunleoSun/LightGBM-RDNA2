@@ -282,9 +282,9 @@ def compare(
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--train-rows", type=int, default=100000)
+    p.add_argument("--train-rows", type=int, default=40000)
     p.add_argument("--valid-rows", type=int, default=50000)
-    p.add_argument("--features", type=int, default=1000)
+    p.add_argument("--features", type=int, default=3000)
     p.add_argument("--iterations", type=int, default=100)
     p.add_argument("--atol", type=float, default=1e-6)
     p.add_argument("--rtol", type=float, default=1e-6)

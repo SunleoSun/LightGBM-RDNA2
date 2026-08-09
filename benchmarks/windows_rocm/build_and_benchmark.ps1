@@ -1,9 +1,9 @@
 param(
     [string]$OldDll = 'C:\Drive\MyPrograms\SunTrader\Python\lightGBM\lightgbm.dll',
     [string]$RocmPath = 'C:\Program Files\AMD\ROCm\6.2',
-    [int]$TrainRows = 100000,
+    [int]$TrainRows = 40000,
     [int]$ValidRows = 50000,
-    [int]$Features = 1000,
+    [int]$Features = 3000,
     [int]$Iterations = 100,
     [double]$PredictionAtol = 1e-6,
     [double]$PredictionRtol = 1e-6
