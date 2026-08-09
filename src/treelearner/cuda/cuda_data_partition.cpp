@@ -98,10 +98,9 @@ void CUDADataPartition::BeforeTrain() {
   if (!use_bagging_) {
     LaunchFillDataIndicesBeforeTrain();
   }
-  SetCUDAMemory<data_size_t>(cuda_leaf_num_data_.RawData(), 0, static_cast<size_t>(num_leaves_), __FILE__, __LINE__);
-  SetCUDAMemory<data_size_t>(cuda_leaf_data_start_.RawData(), 0, static_cast<size_t>(num_leaves_), __FILE__, __LINE__);
-  SetCUDAMemory<data_size_t>(cuda_leaf_data_end_.RawData(), 0, static_cast<size_t>(num_leaves_), __FILE__, __LINE__);
-  SynchronizeCUDADevice(__FILE__, __LINE__);
+  CUDASUCCESS_OR_FATAL(cudaMemset(cuda_leaf_num_data_.RawData(), 0, static_cast<size_t>(num_leaves_) * sizeof(data_size_t)));
+  CUDASUCCESS_OR_FATAL(cudaMemset(cuda_leaf_data_start_.RawData(), 0, static_cast<size_t>(num_leaves_) * sizeof(data_size_t)));
+  CUDASUCCESS_OR_FATAL(cudaMemset(cuda_leaf_data_end_.RawData(), 0, static_cast<size_t>(num_leaves_) * sizeof(data_size_t)));
   if (!use_bagging_) {
     CopyFromCUDADeviceToCUDADevice<data_size_t>(cuda_leaf_num_data_.RawData(), cuda_num_data_.RawData(), 1, __FILE__, __LINE__);
     CopyFromCUDADeviceToCUDADevice<data_size_t>(cuda_leaf_data_end_.RawData(), cuda_num_data_.RawData(), 1, __FILE__, __LINE__);
@@ -109,7 +108,6 @@ void CUDADataPartition::BeforeTrain() {
     CopyFromHostToCUDADevice<data_size_t>(cuda_leaf_num_data_.RawData(), &num_used_indices_, 1, __FILE__, __LINE__);
     CopyFromHostToCUDADevice<data_size_t>(cuda_leaf_data_end_.RawData(), &num_used_indices_, 1, __FILE__, __LINE__);
   }
-  SynchronizeCUDADevice(__FILE__, __LINE__);
   CopyFromHostToCUDADevice<hist_t*>(cuda_hist_pool_.RawData(), &cuda_hist_, 1, __FILE__, __LINE__);
 }
 
