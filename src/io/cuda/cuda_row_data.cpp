@@ -149,6 +149,12 @@ void CUDARowData::Init(const Dataset* train_data, TrainingShareStates* train_sha
     Log::Fatal("Unknown bit type = %d", bit_type_);
   }
   SynchronizeCUDADevice(__FILE__, __LINE__);
+#ifdef TIMETAG
+  Log::Info("CUDA row data profile: sparse=%d bit_type=%u row_ptr_bits=%u partitions=%d large_partitions=%d max_columns_per_partition=%d shared_hist_size=%d",
+            static_cast<int>(is_sparse_), static_cast<unsigned>(bit_type_), static_cast<unsigned>(row_ptr_bit_type_),
+            num_feature_partitions_, static_cast<int>(large_bin_partitions_.size()),
+            max_num_column_per_partition_, shared_hist_size_);
+#endif
 }
 
 void CUDARowData::DivideCUDAFeatureGroups(const Dataset* train_data, TrainingShareStates* share_state) {

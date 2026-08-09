@@ -10,6 +10,7 @@ benchmarks/windows_rocm/data/
 benchmarks/windows_rocm/artifacts/
 benchmarks/windows_rocm/build-cpu/
 benchmarks/windows_rocm/build-rocm/
+benchmarks/windows_rocm/build-rocm-timetag/
 *.user
 *.userosscache
 *.sln.docstates

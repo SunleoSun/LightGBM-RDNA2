@@ -130,8 +130,12 @@ if ((global_num_data_in_smaller_leaf <= min_data_in_leaf_ || sum_hessians_in_sma
     (global_num_data_in_larger_leaf <= min_data_in_leaf_ || sum_hessians_in_larger_leaf <= min_sum_hessian_in_leaf_)) {
     return;
   }
+  global_timer.Start("CUDAHistogramConstructor::LaunchConstructHistogramKernel");
   LaunchConstructHistogramKernel(cuda_smaller_leaf_splits, num_data_in_smaller_leaf, num_bits_in_histogram_bins);
+  global_timer.Stop("CUDAHistogramConstructor::LaunchConstructHistogramKernel");
+  global_timer.Start("CUDAHistogramConstructor::ConstructHistogramSynchronize");
   SynchronizeCUDADevice(__FILE__, __LINE__);
+  global_timer.Stop("CUDAHistogramConstructor::ConstructHistogramSynchronize");
 }
 
 void CUDAHistogramConstructor::SubtractHistogramForLeaf(
