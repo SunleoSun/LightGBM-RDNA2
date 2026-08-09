@@ -9,7 +9,9 @@
 
 #ifdef USE_CUDA
 
+#if !defined(_WIN32)
 #include <pthread.h>
+#endif
 
 #include <LightGBM/objective_function.h>
 #include <LightGBM/network.h>
