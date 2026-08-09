@@ -151,8 +151,8 @@ class CUDAHistogramConstructor {
   std::vector<int> need_fix_histogram_features_;
   /*! \brief aligned number of bins of the features whose histograms need to be fixed */
   std::vector<uint32_t> need_fix_histogram_features_num_bin_aligend_;
-  /*! \brief minimum number of blocks allowed in the y dimension */
-  const int min_grid_dim_y_ = 160;
+  /*! \brief device-specific minimum number of blocks allowed in the y dimension */
+  int min_grid_dim_y_ = 160;
 
 
   // CUDA memory, held by this object
