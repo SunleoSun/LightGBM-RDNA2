@@ -115,6 +115,10 @@ class CUDAHistogramConstructor {
     const data_size_t num_data_in_smaller_leaf,
     const uint8_t num_bits_in_histogram_bins);
 
+  void LaunchConstructHistogramGfx1030Feature4Kernel(
+    const CUDALeafSplitsStruct* cuda_smaller_leaf_splits,
+    const data_size_t num_data_in_smaller_leaf);
+
   void LaunchSubtractHistogramKernel(
     const CUDALeafSplitsStruct* cuda_smaller_leaf_splits,
     const CUDALeafSplitsStruct* cuda_larger_leaf_splits,
