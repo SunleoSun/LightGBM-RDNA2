@@ -58,9 +58,17 @@ class RDNA2HistogramEngine {
     }
 
     num_feature4_ = (dense_feature_groups_.size() + 3) / 4;
-    h64_eligible_ = !dense_feature_groups_.empty() &&
+    h64_eligible_ = dense_feature_groups_.size() == static_cast<size_t>(num_feature_groups) &&
+                    !dense_feature_groups_.empty() &&
                     std::all_of(dense_feature_num_bins_.begin(), dense_feature_num_bins_.end(),
                                 [](int bins) { return bins <= 64; });
+
+    num_total_bins_ = static_cast<size_t>(train_data_->NumTotalBin());
+    std::vector<uint32_t> host_group_bin_offsets(static_cast<size_t>(num_feature_groups) + 1);
+    for (int group = 0; group <= num_feature_groups; ++group) {
+      host_group_bin_offsets[static_cast<size_t>(group)] =
+          static_cast<uint32_t>(train_data_->GroupBinBoundary(group));
+    }
 
     const auto start = std::chrono::steady_clock::now();
     std::vector<PackedFeature4> host_packed(static_cast<size_t>(num_feature4_) * static_cast<size_t>(num_data_));
@@ -115,6 +123,11 @@ class RDNA2HistogramEngine {
 
     const auto packed_ready = std::chrono::steady_clock::now();
     packed_features_.Resize(host_packed.size());
+    group_bin_offsets_.InitFromHostVector(host_group_bin_offsets);
+    gradients_.Resize(static_cast<size_t>(num_data_));
+    hessians_.Resize(static_cast<size_t>(num_data_));
+    data_indices_.Resize(static_cast<size_t>(num_data_));
+    histogram_.Resize(num_total_bins_ * 2);
     const auto allocation_done = std::chrono::steady_clock::now();
     CopyFromHostToCUDADevice(packed_features_.RawData(), host_packed.data(), host_packed.size(), __FILE__, __LINE__);
     const auto upload_done = std::chrono::steady_clock::now();
@@ -127,10 +140,20 @@ class RDNA2HistogramEngine {
               static_cast<int>(num_feature4_), packed_mib, h64_eligible_ ? "yes" : "no",
               pack_elapsed.count(), allocation_elapsed.count(), upload_elapsed.count());
   }
+  void BeforeTrain(const score_t* gradients, const score_t* hessians);
+
+  bool ConstructH64(const data_size_t* data_indices, data_size_t num_data, hist_t* host_histogram);
+
   bool h64_eligible() const { return h64_eligible_; }
   data_size_t num_data() const { return num_data_; }
   size_t num_feature4() const { return num_feature4_; }
+  size_t num_total_bins() const { return num_total_bins_; }
   const PackedFeature4* packed_features() const { return packed_features_.RawDataReadOnly(); }
+  const uint32_t* group_bin_offsets() const { return group_bin_offsets_.RawDataReadOnly(); }
+  score_t* device_gradients() { return gradients_.RawData(); }
+  score_t* device_hessians() { return hessians_.RawData(); }
+  data_size_t* device_data_indices() { return data_indices_.RawData(); }
+  hist_t* device_histogram() { return histogram_.RawData(); }
   const std::vector<int>& dense_feature_groups() const { return dense_feature_groups_; }
   const std::vector<int>& dense_feature_num_bins() const { return dense_feature_num_bins_; }
 
@@ -138,10 +161,16 @@ class RDNA2HistogramEngine {
   const Dataset* train_data_ = nullptr;
   data_size_t num_data_ = 0;
   size_t num_feature4_ = 0;
+  size_t num_total_bins_ = 0;
   bool h64_eligible_ = false;
   std::vector<int> dense_feature_groups_;
   std::vector<int> dense_feature_num_bins_;
   CUDAVector<PackedFeature4> packed_features_;
+  CUDAVector<uint32_t> group_bin_offsets_;
+  CUDAVector<score_t> gradients_;
+  CUDAVector<score_t> hessians_;
+  CUDAVector<data_size_t> data_indices_;
+  CUDAVector<hist_t> histogram_;
 };
 
 }  // namespace LightGBM

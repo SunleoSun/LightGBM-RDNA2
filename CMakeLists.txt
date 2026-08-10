@@ -468,6 +468,7 @@ set(
       src/treelearner/cuda/cuda_histogram_constructor.cu
       src/treelearner/cuda/cuda_leaf_splits.cu
       src/treelearner/cuda/cuda_single_gpu_tree_learner.cu
+      src/treelearner/rdna2/rdna2_histogram_engine.cu
       src/io/cuda/cuda_column_data.cu
       src/io/cuda/cuda_tree.cu
       src/io/cuda/cuda_column_data.cpp

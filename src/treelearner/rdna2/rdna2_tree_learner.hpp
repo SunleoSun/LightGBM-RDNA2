@@ -27,8 +27,23 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
   }
 
  protected:
+  void BeforeTrain() override {
+    SerialTreeLearner::BeforeTrain();
+    if (!config_->use_quantized_grad) {
+      histogram_engine_.BeforeTrain(gradients_, hessians_);
+    }
+  }
+
   void ConstructHistograms(const std::vector<int8_t>& is_feature_used, bool use_subtract) override {
-    // Correctness fallback remains canonical until the first HIP histogram producer is enabled.
+    const bool only_smaller_leaf_needed = larger_leaf_histogram_array_ == nullptr || use_subtract;
+    if (!config_->use_quantized_grad && only_smaller_leaf_needed) {
+      hist_t* ptr_smaller_leaf_hist_data = smaller_leaf_histogram_array_[0].RawData() - kHistOffset;
+      if (histogram_engine_.ConstructH64(smaller_leaf_splits_->data_indices(),
+                                         smaller_leaf_splits_->num_data_in_leaf(),
+                                         ptr_smaller_leaf_hist_data)) {
+        return;
+      }
+    }
     SerialTreeLearner::ConstructHistograms(is_feature_used, use_subtract);
   }
 
