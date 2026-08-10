@@ -1,68 +1,52 @@
 ---
-description: Source-grounded optimization order for RX 6800 XT gfx1030, from safe dispatch through H64/H128 reference kernels, SuperTile, wave32, subtraction, and split fusion.
+description: Current RDNA2 optimization roadmap for RX 6800 XT/gfx1030 after exact H64/H128 HIP histograms and stream/pinned transfer cleanup.
 ---
 
 # RX 6800 XT optimization roadmap
 
-This ordering now follows a revised production boundary. The current `CUDASingleGPUTreeLearner` remains a diagnostic source and keeps the accepted fixes, but it is no longer the preferred semantic foundation for RX 6800 XT work. The preferred owner is a fork-specific `rdna2` tree learner that preserves `GPUTreeLearner` / `SerialTreeLearner` host semantics and delegates histogram construction to an RDNA2 HIP engine.
+The production owner is `device_type=rdna2`: `RDNA2TreeLearner` preserves `SerialTreeLearner` objective, score, split-selection, leaf bookkeeping, and subtraction semantics while `RDNA2HistogramEngine` owns gfx1030 data layout and HIP histogram construction. `device_type=cuda` remains diagnostic; `device_type=gpu` remains legacy OpenCL. CPU LightGBM 4.7 is the correctness oracle.
 
-## Phase 0 - establish the RDNA2 backend boundary
+## Completed foundation
 
-`device_type=rdna2` is now implemented without changing upstream `cpu`, `gpu`, or `cuda` contracts. `RDNA2TreeLearner` derives from `SerialTreeLearner`; its histogram override currently delegates to the canonical Serial implementation, so objective, score, split-selection, leaf bookkeeping, subtraction, and histogram semantics are all an exact correctness baseline. The native ROCm smoke suite passes all H64/H128, weighted-binary, and regression profiles with prediction diff `0` and exact tree text/structure against the LightGBM 4.7 CPU reference. This is the semantic boundary that the HIP histogram engine must preserve.
+Phase 0 is complete. `device_type=rdna2` is an explicit single-machine backend, uses the canonical CPU-created `Dataset` / `BinMapper`, and does not route through CUDA objective, score updater, best-split finder, or data partition semantics.
 
-The benchmark already proves that CPU, legacy OpenCL, and RDNA2 consume the same CPU-produced `.bin`; dataset rebucketing is not the current divergence source. RDNA2 uses a col-wise canonical dataset view and deliberately keeps `LGBM_config_::current_device` on CPU so generic CUDA objective/host-allocation semantics do not leak into the backend.
+The packed dataset foundation is complete for the dense production path. Exact canonical bin IDs are packed once as persistent tuple-major `uint32 feature4[group][row]` storage. For 40k x 3000 this is about 114.44 MiB. The representation is derived from canonical bins and never owns binning semantics.
 
-Keep the existing gfx1030 feature4 guard in the CUDA/HIP diagnostic path: the old feature4 kernel is valid only when the selected partition contains at most four columns. H64/H128 bypass it while H256 can retain the proven fast path. The generic HIP fallback is still useful as a diagnostic baseline but should not define RDNA2 correctness semantics.
+## Completed H64 and H128 reference kernels
 
-The August 9 synchronization reductions and gfx1030 grid/data-per-thread tuning have been rollback-tested and do not change the residual mismatch. CPU-objective-only routing, single-grid-y construction, and a CUDA best-split count-prefix experiment also did not change the failing structure and were reverted.
+H64 and H128 now have exact HIP histogram producers. Both consume persistent Feature4 data, use 256-thread workgroups and four double-precision LDS banks, support the root and indexed smaller-leaf paths, and write directly into the canonical Serial histogram layout. Gradients/Hessians are uploaded once per tree. Indexed smaller-leaf row IDs are uploaded when needed. Parent-minus-smaller subtraction and best-split evaluation stay on the Serial host path. Cases that require independently constructing both children still use the Serial histogram fallback.
 
-## Phase 1 - H64 OpenCL-style reference
+The smoke suite and representative Optuna envelope pass with prediction max diff `0` and exact CPU 4.7 tree structure. The first production 100-tree baselines were about `31.804 ms/tree` H64 versus CPU `49.832`, and `45.525 ms/tree` H128 versus CPU `72.007`.
 
-Implement a dedicated dense H64 HIP kernel for gfx1030. Preserve existing LightGBM histogram offsets, missing/default-bin fixup, smaller-child ownership, and subtraction semantics. Use the proven OpenCL `histogram64.cl` as the architectural reference: 256 threads, packed four-feature reads, four LDS banks, bank-aware `(bin, bank, G/H, feature)` placement, lane feature rotation, software prefetch, root/no-index specialization, and optional constant-Hessian handling.
+## Completed transfer/synchronization cleanup
 
-The first H64 milestone is correctness against the LightGBM 4.7 CPU reference and comparison against legacy OpenCL, not peak speed. Because generic HIP can differ on late near-tie splits, inspect the first divergent split rather than assuming every non-bit-identical result is a layout bug. The specialized reference should aim to reproduce the proven OpenCL accumulation/layout behavior closely enough to pass the strict project gate.
+The histogram pipeline now owns one persistent HIP stream. Gradient/Hessian and indexed-leaf H2D copies, histogram memset, kernel launch, and D2H are ordered on that stream. The old device-wide synchronizations around every histogram readback were replaced by one stream synchronization. Histogram D2H targets reusable pinned host staging memory and is then copied into the exact Serial-owned histogram buffer.
 
-## Phase 2 - dedicated H128 reference
+This preserves bit-for-bit CPU correctness. Representative 100-tree measurements after the change put H64 around `30.7 ms/tree`, roughly a 3% improvement over the first exact H64 reference. H128 stayed approximately neutral around `46 ms/tree` versus the earlier `45.5 ms/tree` observation, so transfer cleanup is not the main H128 bottleneck. A two-LDS-bank H128 geometry was also neutral and was reverted to four banks.
 
-Create an independent H128 specialization rather than stretching the H64 or H256 kernel. Select workgroup size, bank count, and features-per-workgroup from measured LDS/VGPR occupancy on gfx1030. H128 must pass the same binary/regression correctness gates and histogram subtraction lifecycle before any architecture experiments are layered on top.
+## Immediate Phase 3 - Feature SuperTile
 
-## Phase 3 - packed dataset and Feature SuperTile
+The largest remaining architectural waste is repeated row-state loading. With about 3000 features the current four-feature kernel creates roughly 750 Feature4 workgroups, and each tuple independently reloads the same row index, gradient, and Hessian. The next task is SuperTile reuse while retaining the current canonical packed dataset and double-precision accumulation semantics.
 
-Move from four-feature partitions toward a row-state-reuse design. The production matrix has about 3000 features but only about 40k rows, so repeatedly loading the same leaf index, gradient, and Hessian for hundreds of feature groups is the major architectural waste.
+For H64, start with 16 features per workgroup (four adjacent Feature4 tuples), 256 threads, and four double LDS banks. Base shared histogram storage is `16 * 64 * 2 * 8 * 4 = 64 KiB`, permitting two such workgroups per 128 KiB LDS CU in the LDS-only limit. The grid drops from about 750 tuple workgroups to about 188 SuperTiles, while each row loads gradient/Hessian once for sixteen features instead of four. Validate exact CPU structure/predictions before tuning feature rotation, prefetch, or temporal accumulation.
 
-For H64, evaluate approximately 16 features per workgroup with four native wave32s. The base G/H storage for `16 * 64 * 2 * 4 bytes` is about 8 KB LDS before banking/auxiliary state. This reduces conceptual feature groups from about 750 four-feature groups to about 188 sixteen-feature groups and gives substantially more reuse of row-state. H128 should test 8 versus 16 features per workgroup based on occupancy and bank behavior rather than assuming the H64 geometry.
+For H128, test an independent eight-feature SuperTile first. `8 * 128 * 2 * 8 * 4` is also 64 KiB. Do not automatically use the H64 tile width; measured LDS/VGPR occupancy and atomic pressure decide the final geometry.
 
-If needed, add an explicit GPU packed representation such as `uint32 feature4[group][row]` so aligned four-byte feature loads become the canonical dense H64/H128 input instead of reinterpret-casting arbitrary partition rows.
+## Later phases
 
-## Phase 4 - root, large-leaf, and constant-Hessian specializations
+After SuperTile is exact and faster, tune root/no-index specialization, workgroup and bank geometry separately for H64/H128, safe prefetch/temporal aggregation, and constant-Hessian handling. The float-LDS experiment is rejected because it exceeded the strict prediction tolerance and was slower.
 
-The root leaf can avoid index gathers entirely. Large leaves may benefit from a linear scan path while indexed gathers remain the default for smaller children. Benchmark this as a separate dispatch decision; do not mix membership semantics into the core histogram math.
+Native wave32 equal-bin aggregation comes only after SuperTile is stable. Accumulation-order changes are correctness-sensitive and must pass the full gate.
 
-For objectives with constant Hessian, evaluate gradient-plus-count histograms and derive Hessian from count times the constant Hessian. `regression_l2` is the most useful correctness profile for this specialization.
+Dataset construction optimization remains a parallel end-to-end objective: structured timing/peak-RAM measurement, persistent packed caches, fewer host copies, and only later GPU-assisted canonical bin construction if binning itself remains dominant.
 
-## Phase 5 - native wave32 equal-bin aggregation
+Best-split fusion or moving split finding onto GPU remains late-stage work. It changes ownership and numerical semantics and must not be used to recover performance before the histogram/data path is exhausted.
 
-Once SuperTile H64/H128 is correctness-stable, use RDNA2 native wave32 primitives to combine lanes that target the same bin before LDS atomics. H64 is the strongest candidate because 32 lanes mapped into 64 bins create frequent collisions. Preserve the numerical contract carefully: previous accumulation-order changes have altered split selection. Any aggregation method must pass smoke and stress before performance is accepted.
+## Validation order
 
-## Phase 6 - histogram merge, fixup, and subtraction
-
-After construction is fast, profile the global write/merge path. Current kernels emit durable `hist_in_leaf` data and later run `FixHistogramKernel` followed by `SubtractHistogramKernel` for the larger child. Optimize these only after preserving the canonical histogram layout and most-frequent-bin reconstruction semantics. Potential work includes reducing global atomics between workgroups, specializing the single-workgroup/root case, and fusing reduction with durable write where deterministic behavior is retained.
-
-Histogram subtraction is especially important for Stage-2 trees with many small leaves; do not replace the smaller-child/subtract strategy with rebuilding both children.
-
-## Phase 7 - best-split scheduling and optional fusion
-
-`CUDABestSplitFinder::FindBestSplitsForLeaf` consumes the completed smaller/larger histograms and synchronizes after split kernels; `FindBestFromAllSplits` has another device synchronization. Only after histogram construction, merge, and subtraction stop dominating should these boundaries be optimized.
-
-Possible later work is feature-tile histogram -> prefix/gain evaluation while data is hot, and parent-minus-smaller subtraction combined with larger-child split evaluation. This changes ownership between histogram construction and split finding, so it should be done only with a clear durable-histogram contract and boundary regression tests. Do not repeat the earlier naive concurrent smaller/larger split attempt.
-
-## Validation order for every phase
-
-1. Focused H64 or H128 smoke profile after each kernel/dispatch change.
-2. Full smoke suite (`h64`, `h128`, `h64_scale16`, `h128_regression`).
-3. Production H64/H128 only when smoke passes.
-4. Full strict stress matrix before merging a completed architectural stage.
-5. Retain an H256 regression check while the historical feature4 path remains reachable.
-6. Compare kernel timers, total training time, tree structure, predictions, AUC/RMSE, and tree count. Performance without correctness is discarded.
-
-Phases 1 and 2 now have exact H64 and H128 HIP reference producers. `RDNA2HistogramEngine` keeps canonical `uint32 feature4[group][row]` data resident, uploads gradients/Hessians once per tree, uploads indexed smaller-leaf row IDs when needed, and dispatches compile-time 64-bin or 128-bin kernels with 256 threads and four double-precision LDS banks directly into the Serial histogram layout. Root and subtraction-smaller-leaf paths use HIP; cases requiring independent construction of both children still fall back to Serial. Smoke and the full representative Optuna envelope remain prediction-diff `0` with exact CPU 4.7 tree structure. Production 100-tree measurements are about `31.804 ms/tree` H64 versus CPU `49.832`, and `45.525 ms/tree` H128 versus CPU `72.007`. The next stage is independent H64/H128 tuning of transfer, synchronization, LDS-bank/workgroup geometry, and atomic pressure before moving to SuperTile.
+1. Focused H64/H128 profile after each kernel change.
+2. Full `smoke` suite.
+3. Representative `optuna` envelope after a completed optimization.
+4. 100-tree production H64/H128 performance comparison only after correctness passes.
+5. `optuna_long` before accepting a major architectural stage such as SuperTile/wave32.
+6. Keep H256 as a regression check for the separate historical CUDA diagnostic Feature4 path.

@@ -9,9 +9,7 @@ namespace {
 
 constexpr int kHistogramThreads = 256;
 constexpr int kFeaturesPerTuple = 4;
-constexpr int kHistogramBanks = 4;
-
-template <int NUM_BINS>
+template <int NUM_BINS, int NUM_BANKS>
 __global__ void RDNA2HistogramKernel(
     const uint32_t* packed_features,
     const score_t* gradients,
@@ -22,8 +20,9 @@ __global__ void RDNA2HistogramKernel(
     const data_size_t leaf_num_data,
     const int num_groups,
     hist_t* histogram) {
+  static_assert(NUM_BANKS == 2 || NUM_BANKS == 4 || NUM_BANKS == 8, "RDNA2 histogram bank count must be a power-of-two tuning point");
   constexpr int kEntriesPerBank = kFeaturesPerTuple * NUM_BINS * 2;
-  constexpr int kSharedEntries = kHistogramBanks * kEntriesPerBank;
+  constexpr int kSharedEntries = NUM_BANKS * kEntriesPerBank;
   __shared__ hist_t shared_hist[kSharedEntries];
 
   const int tid = static_cast<int>(threadIdx.x);
@@ -34,7 +33,7 @@ __global__ void RDNA2HistogramKernel(
 
   const int tuple = static_cast<int>(blockIdx.x);
   const int group_base = tuple * kFeaturesPerTuple;
-  const int bank = (tid >> 3) & (kHistogramBanks - 1);
+  const int bank = (tid >> 3) & (NUM_BANKS - 1);
   const int feature_rotation = tid & (kFeaturesPerTuple - 1);
   const uint32_t* tuple_data = packed_features + static_cast<size_t>(tuple) * dataset_num_data;
 
@@ -70,7 +69,7 @@ __global__ void RDNA2HistogramKernel(
         hist_t grad_sum = 0.0;
         hist_t hess_sum = 0.0;
 #pragma unroll
-        for (int reduce_bank = 0; reduce_bank < kHistogramBanks; ++reduce_bank) {
+        for (int reduce_bank = 0; reduce_bank < NUM_BANKS; ++reduce_bank) {
           const int base = reduce_bank * kEntriesPerBank + ((feature * NUM_BINS + bin) * 2);
           grad_sum += shared_hist[base];
           hess_sum += shared_hist[base + 1];
@@ -89,8 +88,12 @@ void RDNA2HistogramEngine::BeforeTrain(const score_t* gradients, const score_t* 
   if ((!h64_eligible_ && !h128_eligible_) || gradients == nullptr || hessians == nullptr) {
     return;
   }
-  CopyFromHostToCUDADevice(device_gradients(), gradients, static_cast<size_t>(num_data_), __FILE__, __LINE__);
-  CopyFromHostToCUDADevice(device_hessians(), hessians, static_cast<size_t>(num_data_), __FILE__, __LINE__);
+  CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(device_gradients(), gradients,
+                                       static_cast<size_t>(num_data_) * sizeof(score_t),
+                                       cudaMemcpyHostToDevice, stream()));
+  CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(device_hessians(), hessians,
+                                       static_cast<size_t>(num_data_) * sizeof(score_t),
+                                       cudaMemcpyHostToDevice, stream()));
 }
 
 bool RDNA2HistogramEngine::ConstructHistogram(
@@ -101,28 +104,32 @@ bool RDNA2HistogramEngine::ConstructHistogram(
 
   const data_size_t* device_indices = nullptr;
   if (data_indices != nullptr && num_data < num_data_) {
-    CopyFromHostToCUDADevice(device_data_indices(), data_indices, static_cast<size_t>(num_data), __FILE__, __LINE__);
+    CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(device_data_indices(), data_indices,
+                                         static_cast<size_t>(num_data) * sizeof(data_size_t),
+                                         cudaMemcpyHostToDevice, stream()));
     device_indices = device_data_indices();
   }
 
-  CUDASUCCESS_OR_FATAL(cudaMemset(device_histogram(), 0, num_total_bins_ * 2 * sizeof(hist_t)));
+  CUDASUCCESS_OR_FATAL(cudaMemsetAsync(device_histogram(), 0,
+                                       num_total_bins_ * 2 * sizeof(hist_t), stream()));
   const int num_groups = static_cast<int>(dense_feature_groups_.size());
   const dim3 grid(static_cast<unsigned int>(num_feature4_));
   const dim3 block(kHistogramThreads);
   if (h64_eligible_) {
-    RDNA2HistogramKernel<64><<<grid, block>>>(
+    RDNA2HistogramKernel<64, 4><<<grid, block, 0, stream()>>>(
         reinterpret_cast<const uint32_t*>(packed_features()),
         device_gradients(), device_hessians(), device_indices, group_bin_offsets(), num_data_, num_data,
         num_groups, device_histogram());
   } else {
-    RDNA2HistogramKernel<128><<<grid, block>>>(
+    RDNA2HistogramKernel<128, 4><<<grid, block, 0, stream()>>>(
         reinterpret_cast<const uint32_t*>(packed_features()),
         device_gradients(), device_hessians(), device_indices, group_bin_offsets(), num_data_, num_data,
         num_groups, device_histogram());
   }
-  SynchronizeCUDADevice(__FILE__, __LINE__);
-  CopyFromCUDADeviceToHost(host_histogram, device_histogram(), num_total_bins_ * 2, __FILE__, __LINE__);
-  SynchronizeCUDADevice(__FILE__, __LINE__);
+  CopyFromCUDADeviceToHostAsync(host_histogram_staging(), device_histogram(), num_total_bins_ * 2,
+                                stream(), __FILE__, __LINE__);
+  SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
+  std::memcpy(host_histogram, host_histogram_staging(), num_total_bins_ * 2 * sizeof(hist_t));
   return true;
 }
 

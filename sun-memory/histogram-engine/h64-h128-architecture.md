@@ -1,5 +1,5 @@
 ---
-description: H64/H128 histogram-engine contract, implemented exact H64 HIP path, RX 6800 XT design constraints, and next H128/SuperTile work.
+description: Exact H64/H128 HIP histogram architecture, transfer pipeline, RX 6800 XT constraints, and immediate SuperTile work.
 ---
 
 # H64/H128 histogram engine
@@ -18,4 +18,6 @@ Legacy OpenCL `histogram64` remains an architectural/performance reference, not 
 
 The first H128 HIP reference is also implemented as a separate compile-time `NUM_BINS=128` instantiation of the same canonical Feature4 producer. It keeps 256 threads and four double-precision LDS banks, requiring about 32 KiB LDS per workgroup versus about 16 KiB for H64, and uses two output rounds because four features times 128 bins exceeds 256 threads. H128 smoke, regression, and the representative Optuna envelope remain prediction-diff `0` with exact CPU structure. A 100-tree production H128 run measured about `45.525 ms/tree` versus CPU `72.007 ms/tree`, with identical AUC, predictions, and structure.
 
-Next performance work should tune H64 and H128 independently despite the shared reference template: profile bank count/workgroup geometry, transfer/synchronization overhead, root specialization, and safe temporal aggregation without changing double accumulation semantics. H128 should not inherit an H64 geometry merely because the reference code is templated. SuperTile comes after both paths are stable; it should reuse row state across approximately 8-16 features per workgroup.
+The transfer path now uses one persistent HIP stream: gradients/Hessians and indexed row IDs are queued with async H2D, histogram memset and kernel work are ordered on the same stream, and D2H goes into reusable pinned staging followed by one stream synchronization and a host memcpy into the Serial-owned histogram. This removed per-histogram device-wide synchronization. H64 improved from the first exact reference around `31.8` to about `30.7 ms/tree` in a representative 100-tree run; H128 stayed approximately neutral around `46 ms/tree`. An H128 two-bank LDS trial was neutral and was reverted to four banks.
+
+The immediate performance task is SuperTile row-state reuse. H64 should first test 16 features per 256-thread workgroup by consuming four existing Feature4 tuple bases, with four double LDS banks (64 KiB total histogram state). H128 should independently start at eight features for the same 64 KiB LDS footprint. This avoids a dataset repack and reduces repeated gradient/Hessian/index loads before more fragile wave32 or accumulation-order optimizations.

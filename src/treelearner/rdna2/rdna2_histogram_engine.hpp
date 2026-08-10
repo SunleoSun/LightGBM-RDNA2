@@ -27,6 +27,19 @@ class RDNA2HistogramEngine {
 
   RDNA2HistogramEngine() = default;
 
+  ~RDNA2HistogramEngine() {
+    if (stream_ != nullptr) {
+      SynchronizeCUDAStream(stream_, __FILE__, __LINE__);
+      CUDASUCCESS_OR_FATAL(cudaStreamDestroy(stream_));
+      stream_ = nullptr;
+    }
+    if (host_histogram_staging_ != nullptr) {
+      CUDASUCCESS_OR_FATAL(cudaFreeHost(host_histogram_staging_));
+      host_histogram_staging_ = nullptr;
+      host_histogram_staging_size_ = 0;
+    }
+  }
+
   void Init(const Dataset* train_data, int gpu_device_id) {
     CHECK(train_data != nullptr);
     SetCUDADevice(gpu_device_id, __FILE__, __LINE__);
@@ -35,6 +48,9 @@ class RDNA2HistogramEngine {
     CUDASUCCESS_OR_FATAL(cudaGetDeviceProperties(&device_prop, gpu_device_id));
     if (std::strncmp(device_prop.gcnArchName, "gfx1030", 7) != 0) {
       Log::Fatal("device_type=rdna2 currently requires gfx1030; detected %s", device_prop.gcnArchName);
+    }
+    if (stream_ == nullptr) {
+      CUDASUCCESS_OR_FATAL(cudaStreamCreate(&stream_));
     }
 
     train_data_ = train_data;
@@ -69,6 +85,16 @@ class RDNA2HistogramEngine {
                                  [](int bins) { return bins <= 128; });
 
     num_total_bins_ = static_cast<size_t>(train_data_->NumTotalBin());
+    const size_t histogram_values = num_total_bins_ * 2;
+    if (host_histogram_staging_size_ != histogram_values) {
+      if (host_histogram_staging_ != nullptr) {
+        CUDASUCCESS_OR_FATAL(cudaFreeHost(host_histogram_staging_));
+        host_histogram_staging_ = nullptr;
+      }
+      CUDASUCCESS_OR_FATAL(cudaHostAlloc(reinterpret_cast<void**>(&host_histogram_staging_),
+                                         histogram_values * sizeof(hist_t), cudaHostAllocPortable));
+      host_histogram_staging_size_ = histogram_values;
+    }
     std::vector<uint32_t> host_group_bin_offsets(static_cast<size_t>(num_feature_groups) + 1);
     for (int group = 0; group <= num_feature_groups; ++group) {
       host_group_bin_offsets[static_cast<size_t>(group)] =
@@ -161,6 +187,8 @@ class RDNA2HistogramEngine {
   score_t* device_hessians() { return hessians_.RawData(); }
   data_size_t* device_data_indices() { return data_indices_.RawData(); }
   hist_t* device_histogram() { return histogram_.RawData(); }
+  hist_t* host_histogram_staging() { return host_histogram_staging_; }
+  cudaStream_t stream() const { return stream_; }
   const std::vector<int>& dense_feature_groups() const { return dense_feature_groups_; }
   const std::vector<int>& dense_feature_num_bins() const { return dense_feature_num_bins_; }
 
@@ -179,6 +207,9 @@ class RDNA2HistogramEngine {
   CUDAVector<score_t> hessians_;
   CUDAVector<data_size_t> data_indices_;
   CUDAVector<hist_t> histogram_;
+  hist_t* host_histogram_staging_ = nullptr;
+  size_t host_histogram_staging_size_ = 0;
+  cudaStream_t stream_ = nullptr;
 };
 
 }  // namespace LightGBM
