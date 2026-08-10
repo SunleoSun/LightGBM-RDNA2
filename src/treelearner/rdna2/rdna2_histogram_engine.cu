@@ -170,12 +170,21 @@ void RDNA2HistogramEngine::BeforeTrain(const score_t* gradients, const score_t* 
   if ((!h64_eligible_ && !h128_eligible_) || gradients == nullptr || hessians == nullptr) {
     return;
   }
+#ifdef TIMETAG
+  const auto profile_start = std::chrono::steady_clock::now();
+#endif
   CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(device_gradients(), gradients,
                                        static_cast<size_t>(num_data_) * sizeof(score_t),
                                        cudaMemcpyHostToDevice, stream()));
   CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(device_hessians(), hessians,
                                        static_cast<size_t>(num_data_) * sizeof(score_t),
                                        cudaMemcpyHostToDevice, stream()));
+#ifdef TIMETAG
+  SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
+  const auto profile_end = std::chrono::steady_clock::now();
+  ProfileAddGradientH2D(
+      std::chrono::duration<double, std::milli>(profile_end - profile_start).count());
+#endif
 }
 
 bool RDNA2HistogramEngine::ConstructHistogram(
@@ -184,16 +193,41 @@ bool RDNA2HistogramEngine::ConstructHistogram(
     return false;
   }
 
+#ifdef TIMETAG
+  double index_h2d_ms = 0.0;
+  double memset_ms = 0.0;
+  double kernel_ms = 0.0;
+  double d2h_ms = 0.0;
+#endif
   const data_size_t* device_indices = nullptr;
-  if (data_indices != nullptr && num_data < num_data_) {
+  const bool had_index_copy = data_indices != nullptr && num_data < num_data_;
+  if (had_index_copy) {
+#ifdef TIMETAG
+    const auto index_start = std::chrono::steady_clock::now();
+#endif
     CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(device_data_indices(), data_indices,
                                          static_cast<size_t>(num_data) * sizeof(data_size_t),
                                          cudaMemcpyHostToDevice, stream()));
     device_indices = device_data_indices();
+#ifdef TIMETAG
+    SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
+    const auto index_end = std::chrono::steady_clock::now();
+    index_h2d_ms = std::chrono::duration<double, std::milli>(index_end - index_start).count();
+#endif
   }
 
+#ifdef TIMETAG
+  auto stage_start = std::chrono::steady_clock::now();
+#endif
   CUDASUCCESS_OR_FATAL(cudaMemsetAsync(device_histogram(), 0,
                                        num_total_bins_ * 2 * sizeof(hist_t), stream()));
+#ifdef TIMETAG
+  SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
+  auto stage_end = std::chrono::steady_clock::now();
+  memset_ms = std::chrono::duration<double, std::milli>(stage_end - stage_start).count();
+  stage_start = std::chrono::steady_clock::now();
+#endif
+
   const int num_groups = static_cast<int>(dense_feature_groups_.size());
   const dim3 block(kHistogramThreads);
   constexpr int kH64SuperTileTuples = 2;
@@ -219,10 +253,28 @@ bool RDNA2HistogramEngine::ConstructHistogram(
           num_groups, device_histogram());
     }
   }
+#ifdef TIMETAG
+  SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
+  stage_end = std::chrono::steady_clock::now();
+  kernel_ms = std::chrono::duration<double, std::milli>(stage_end - stage_start).count();
+  stage_start = std::chrono::steady_clock::now();
+#endif
+
   CopyFromCUDADeviceToHostAsync(host_histogram_staging(), device_histogram(), num_total_bins_ * 2,
                                 stream(), __FILE__, __LINE__);
   SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
+#ifdef TIMETAG
+  stage_end = std::chrono::steady_clock::now();
+  d2h_ms = std::chrono::duration<double, std::milli>(stage_end - stage_start).count();
+#endif
+  const auto host_copy_start = std::chrono::steady_clock::now();
   std::memcpy(host_histogram, host_histogram_staging(), num_total_bins_ * 2 * sizeof(hist_t));
+#ifdef TIMETAG
+  const auto host_copy_end = std::chrono::steady_clock::now();
+  ProfileAddHistogramCall(
+      index_h2d_ms, memset_ms, kernel_ms, d2h_ms,
+      std::chrono::duration<double, std::milli>(host_copy_end - host_copy_start).count());
+#endif
   return true;
 }
 

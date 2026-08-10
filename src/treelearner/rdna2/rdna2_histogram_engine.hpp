@@ -28,6 +28,14 @@ class RDNA2HistogramEngine {
   RDNA2HistogramEngine() = default;
 
   ~RDNA2HistogramEngine() {
+#ifdef TIMETAG
+    if (profile_histogram_calls_ > 0) {
+      Log::Info("RDNA2 profile: hist_calls=%llu grad_h2d_ms=%.3f index_h2d_ms=%.3f memset_ms=%.3f kernel_ms=%.3f d2h_ms=%.3f host_copy_ms=%.3f",
+                static_cast<unsigned long long>(profile_histogram_calls_), profile_grad_h2d_ms_,
+                profile_index_h2d_ms_, profile_memset_ms_, profile_kernel_ms_, profile_d2h_ms_,
+                profile_host_copy_ms_);
+    }
+#endif
     if (stream_ != nullptr) {
       SynchronizeCUDAStream(stream_, __FILE__, __LINE__);
       CUDASUCCESS_OR_FATAL(cudaStreamDestroy(stream_));
@@ -172,6 +180,7 @@ class RDNA2HistogramEngine {
               h64_eligible_ ? "yes" : (h128_eligible_ ? "h128" : "no"),
               pack_elapsed.count(), allocation_elapsed.count(), upload_elapsed.count());
   }
+
   void BeforeTrain(const score_t* gradients, const score_t* hessians);
 
   bool ConstructHistogram(const data_size_t* data_indices, data_size_t num_data, hist_t* host_histogram);
@@ -192,6 +201,19 @@ class RDNA2HistogramEngine {
   const std::vector<int>& dense_feature_groups() const { return dense_feature_groups_; }
   const std::vector<int>& dense_feature_num_bins() const { return dense_feature_num_bins_; }
 
+#ifdef TIMETAG
+  void ProfileAddGradientH2D(double elapsed_ms) { profile_grad_h2d_ms_ += elapsed_ms; }
+  void ProfileAddHistogramCall(double index_h2d_ms, double memset_ms, double kernel_ms,
+                               double d2h_ms, double host_copy_ms) {
+    profile_index_h2d_ms_ += index_h2d_ms;
+    profile_memset_ms_ += memset_ms;
+    profile_kernel_ms_ += kernel_ms;
+    profile_d2h_ms_ += d2h_ms;
+    profile_host_copy_ms_ += host_copy_ms;
+    ++profile_histogram_calls_;
+  }
+#endif
+
  private:
   const Dataset* train_data_ = nullptr;
   data_size_t num_data_ = 0;
@@ -210,6 +232,15 @@ class RDNA2HistogramEngine {
   hist_t* host_histogram_staging_ = nullptr;
   size_t host_histogram_staging_size_ = 0;
   cudaStream_t stream_ = nullptr;
+#ifdef TIMETAG
+  uint64_t profile_histogram_calls_ = 0;
+  double profile_grad_h2d_ms_ = 0.0;
+  double profile_index_h2d_ms_ = 0.0;
+  double profile_memset_ms_ = 0.0;
+  double profile_kernel_ms_ = 0.0;
+  double profile_d2h_ms_ = 0.0;
+  double profile_host_copy_ms_ = 0.0;
+#endif
 };
 
 }  // namespace LightGBM
