@@ -15,8 +15,9 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 BIN = HERE / "bin"
-DATA = HERE / "data"
-ARTIFACTS = HERE / "artifacts"
+TEMP_ROOT = Path(os.environ.get("LIGHTGBM_RDNA2_TEMP", r"C:\Temp\lightgbm-rdna2-temp"))
+DATA = TEMP_ROOT / "data"
+ARTIFACTS = TEMP_ROOT / "artifacts"
 SEED = 20260809
 
 H64_BASE = {
@@ -86,7 +87,7 @@ PROFILE_CONFIGS = {
     },
 }
 
-SMOKE_PROFILES = ["h64", "h128", "h64_scale16", "h128_scale16", "h64_regression", "h128_regression"]
+SMOKE_PROFILES = ["h64", "h128", "h64_scale16", "h128_regression"]
 STRESS_PROFILES = list(PROFILE_CONFIGS)
 
 
@@ -451,6 +452,7 @@ def main() -> int:
     p.add_argument("--features", type=int, default=3000)
     p.add_argument("--iterations", type=int, default=100)
     p.add_argument("--profile", choices=sorted(PROFILE_CONFIGS), default="h64")
+    p.add_argument("--modes", choices=["all", "v470"], default="all")
     p.add_argument("--atol", type=float, default=1e-6)
     p.add_argument("--rtol", type=float, default=1e-6)
     p.add_argument("--auc-tol", type=float, default=5e-8)
@@ -462,7 +464,7 @@ def main() -> int:
     args = p.parse_args()
 
     profile = PROFILE_CONFIGS[args.profile]
-    ARTIFACTS = HERE / "artifacts" / args.profile
+    ARTIFACTS = TEMP_ROOT / "artifacts" / args.profile
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     dataset_factory = generate_dataset if profile["objective"] == "binary" else generate_regression_dataset
     train_text, _legacy_train_binary, valid_features_file, valid_npz = dataset_factory(
@@ -471,22 +473,27 @@ def main() -> int:
     objective_tag = "binary" if profile["objective"] == "binary" else "regression"
     train_binary = DATA / f"train_{objective_tag}_{args.train_rows}x{args.features}_maxbin{profile['max_bin']}.bin"
     required = {
-        "old": BIN / "lightgbm_old.dll",
         "cpu": BIN / "lightgbm_4.7.0_cpu.dll",
-        "rocm_dll": BIN / "lightgbm_4.7.0_rocm.dll",
         "rocm_exe": BIN / "lightgbm_4.7.0_rocm.exe",
     }
+    if args.modes == "all":
+        required["old"] = BIN / "lightgbm_old.dll"
     missing = [str(v) for v in required.values() if not v.exists()]
     if missing:
         raise RuntimeError("missing benchmark binaries; run build_and_benchmark.ps1 first:\n" + "\n".join(missing))
 
-    ensure_binary_dataset(required["old"], train_text, train_binary, int(profile["max_bin"]))
-    results = [
-        run_capi_variant("old_cpu", required["old"], "cpu", train_binary, valid_npz, args.iterations, profile),
-        run_capi_variant("old_opencl_gpu", required["old"], "gpu", train_binary, valid_npz, args.iterations, profile),
+    # v4.7 CPU is the canonical dataset producer and correctness reference.
+    ensure_binary_dataset(required["cpu"], train_text, train_binary, int(profile["max_bin"]))
+    results = []
+    if args.modes == "all":
+        results.extend([
+            run_capi_variant("old_cpu", required["old"], "cpu", train_binary, valid_npz, args.iterations, profile),
+            run_capi_variant("old_opencl_gpu", required["old"], "gpu", train_binary, valid_npz, args.iterations, profile),
+        ])
+    results.extend([
         run_capi_variant("v470_cpu", required["cpu"], "cpu", train_binary, valid_npz, args.iterations, profile),
         run_rocm_cli("v470_rocm_gpu", required["rocm_exe"], train_binary, valid_features_file, valid_npz, args.iterations, profile),
-    ]
+    ])
     y_valid = np.load(valid_npz)["y"]
     comparison = compare(
         results, args.iterations, y_valid, profile["objective"], args.atol, args.rtol, args.auc_tol,
@@ -500,6 +507,7 @@ def main() -> int:
             "n_estimators": args.iterations, "train_rows": args.train_rows,
             "valid_rows": args.valid_rows, "features": args.features, "seed": SEED,
         },
+        "modes": args.modes, "temp_root": str(TEMP_ROOT),
         "results": results, "comparison": comparison,
     }
     report_path = ARTIFACTS / "summary.json"

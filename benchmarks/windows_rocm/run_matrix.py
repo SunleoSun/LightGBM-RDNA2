@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -9,9 +10,10 @@ import sys
 from run_benchmarks import PROFILE_CONFIGS, SMOKE_PROFILES, STRESS_PROFILES
 
 HERE = Path(__file__).resolve().parent
+TEMP_ROOT = Path(os.environ.get("LIGHTGBM_RDNA2_TEMP", r"C:\Temp\lightgbm-rdna2-temp"))
 
 
-def run_profile(profile: str, iterations: int, train_rows: int, valid_rows: int, features: int) -> dict:
+def run_profile(profile: str, iterations: int, train_rows: int, valid_rows: int, features: int, modes: str) -> dict:
     cmd = [
         sys.executable, str(HERE / "run_benchmarks.py"),
         "--profile", profile,
@@ -19,10 +21,11 @@ def run_profile(profile: str, iterations: int, train_rows: int, valid_rows: int,
         "--train-rows", str(train_rows),
         "--valid-rows", str(valid_rows),
         "--features", str(features),
+        "--modes", modes,
     ]
     print("+", subprocess.list2cmdline(cmd), flush=True)
     proc = subprocess.run(cmd, text=True)
-    summary_path = HERE / "artifacts" / profile / "summary.json"
+    summary_path = TEMP_ROOT / "artifacts" / profile / "summary.json"
     summary = None
     if summary_path.exists():
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -38,7 +41,7 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--suite", choices=["smoke", "production", "stress"], default="smoke")
     p.add_argument("--train-rows", type=int, default=40000)
-    p.add_argument("--valid-rows", type=int, default=50000)
+    p.add_argument("--valid-rows", type=int)
     p.add_argument("--features", type=int, default=3000)
     p.add_argument("--iterations", type=int)
     args = p.parse_args()
@@ -46,14 +49,18 @@ def main() -> int:
     if args.suite == "production":
         profiles = ["h64", "h128"]
         default_iterations = 100
+        modes = "all"
     elif args.suite == "stress":
         profiles = STRESS_PROFILES
         default_iterations = 20
+        modes = "all"
     else:
         profiles = SMOKE_PROFILES
-        default_iterations = 20
+        default_iterations = 6
+        modes = "v470"
 
     iterations = args.iterations if args.iterations is not None else default_iterations
+    valid_rows = args.valid_rows if args.valid_rows is not None else (5000 if args.suite == "smoke" else 50000)
     unknown = [profile for profile in profiles if profile not in PROFILE_CONFIGS]
     if unknown:
         raise RuntimeError(f"unknown benchmark profiles: {unknown}")
@@ -61,11 +68,13 @@ def main() -> int:
     results = []
     for profile in profiles:
         print(f"\n=== {args.suite.upper()} PROFILE {profile} ({iterations} trees) ===", flush=True)
-        results.append(run_profile(profile, iterations, args.train_rows, args.valid_rows, args.features))
+        results.append(run_profile(profile, iterations, args.train_rows, valid_rows, args.features, modes))
 
     matrix = {
         "suite": args.suite,
         "iterations": iterations,
+        "valid_rows": valid_rows,
+        "modes": modes,
         "profiles": profiles,
         "all_checks_passed": all(
             item["exit_code"] == 0
@@ -92,7 +101,7 @@ def main() -> int:
             for item in results
         ],
     }
-    output = HERE / "artifacts" / f"matrix_{args.suite}.json"
+    output = TEMP_ROOT / "artifacts" / f"matrix_{args.suite}.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(matrix, indent=2), encoding="utf-8")
 

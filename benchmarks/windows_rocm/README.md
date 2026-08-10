@@ -29,7 +29,9 @@ The strict matrix deliberately changes dimensions that exercise different histog
 Suites:
 
 ```powershell
-# Fast development gate: six representative profiles, 20 trees each.
+# Fast development gate: four representative profiles, 6 trees each.
+# Runs only LightGBM 4.7 CPU + ROCm and uses 5,000 validation rows by default.
+# Training remains production-sized at 40,000 x 3,000.
 python .\benchmarks\windows_rocm\run_matrix.py --suite smoke
 
 # Real timing: H64 + H128, 100 trees each.
@@ -50,8 +52,8 @@ The build wrapper can build and run the same suites:
 .\benchmarks\windows_rocm\build_and_benchmark.ps1 -Suite single -Profile h64 -Iterations 100
 ```
 
-`-MatrixIterations N` overrides the suite default when using the build wrapper. Smoke/stress default to 20 trees; production defaults to 100.
+`-MatrixIterations N` overrides the suite default when using the build wrapper. Smoke defaults to 6 trees, stress to 20, and production to 100.
 
-Artifacts for each profile are written under `artifacts/<profile>/`. Matrix summaries are written to `artifacts/matrix_smoke.json`, `matrix_production.json`, or `matrix_stress.json`.
+Runtime datasets, models, predictions, logs/results, and matrix summaries are kept under `C:\Temp\lightgbm-rdna2-temp` by default instead of cluttering `C:\Temp` or the repository. Set `LIGHTGBM_RDNA2_TEMP` to override that root. Profile artifacts live under `<temp-root>/artifacts/<profile>/`; matrix summaries live under `<temp-root>/artifacts/matrix_*.json`. The first smoke run can be slower while its 5,000-row validation files are generated; subsequent runs reuse that cache.
 
 Native Windows ROCm currently uses the CLI because the experimental HIP `_lightgbm.dll` still crashes during C-API booster creation with `device_type=cuda`; the CLI executes the same CUDA/HIP training path.

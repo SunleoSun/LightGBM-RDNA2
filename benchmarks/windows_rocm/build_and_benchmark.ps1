@@ -3,6 +3,7 @@ param(
     [string]$RocmPath = 'C:\Program Files\AMD\ROCm\6.2',
     [int]$TrainRows = 40000,
     [int]$ValidRows = 50000,
+    [int]$SmokeValidRows = 5000,
     [int]$Features = 3000,
     [int]$Iterations = 100,
     [ValidateSet('h64', 'h128', 'all')]
@@ -72,7 +73,8 @@ if ($Suite -eq 'single') {
     exit 0
 }
 
-$matrixArgs = @((Join-Path $PSScriptRoot 'run_matrix.py'), '--suite', $Suite, '--train-rows', $TrainRows, '--valid-rows', $ValidRows, '--features', $Features)
+$matrixValidRows = if ($Suite -eq 'smoke') { $SmokeValidRows } else { $ValidRows }
+$matrixArgs = @((Join-Path $PSScriptRoot 'run_matrix.py'), '--suite', $Suite, '--train-rows', $TrainRows, '--valid-rows', $matrixValidRows, '--features', $Features)
 if ($MatrixIterations -gt 0) { $matrixArgs += @('--iterations', $MatrixIterations) }
 & $Python @matrixArgs
 exit $LASTEXITCODE
