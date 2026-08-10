@@ -17,8 +17,7 @@ __global__ void RDNA2HistogramKernel(
     const score_t* hessians,
     const data_size_t* data_indices,
     const uint32_t* group_bin_offsets,
-    const int* group_feature_indices,
-    const int8_t* feature_used,
+    const uint8_t* feature4_masks,
     const data_size_t dataset_num_data,
     const data_size_t leaf_num_data,
     const int num_groups,
@@ -29,12 +28,16 @@ __global__ void RDNA2HistogramKernel(
   __shared__ hist_t shared_hist[kSharedEntries];
 
   const int tid = static_cast<int>(threadIdx.x);
+  const int tuple = static_cast<int>(blockIdx.x);
+  const uint8_t active_mask = feature4_masks[tuple];
+  if (active_mask == 0) {
+    return;
+  }
   for (int i = tid; i < kSharedEntries; i += kHistogramThreads) {
     shared_hist[i] = 0.0;
   }
   __syncthreads();
 
-  const int tuple = static_cast<int>(blockIdx.x);
   const int group_base = tuple * kFeaturesPerTuple;
   const int bank = (tid >> 3) & (NUM_BANKS - 1);
   const int feature_rotation = tid & (kFeaturesPerTuple - 1);
@@ -49,7 +52,7 @@ __global__ void RDNA2HistogramKernel(
     for (int slot = 0; slot < kFeaturesPerTuple; ++slot) {
       const int feature = (slot + feature_rotation) & (kFeaturesPerTuple - 1);
       const int group = group_base + feature;
-      if (group < num_groups && feature_used[group_feature_indices[group]] != 0) {
+      if (group < num_groups && (active_mask & (1u << feature)) != 0) {
         const uint32_t bin = (packed >> (feature * 8)) & 0xffu;
         const int base = bank * kEntriesPerBank + ((feature * NUM_BINS + static_cast<int>(bin)) * 2);
         atomicAdd(shared_hist + base, grad);
@@ -64,7 +67,7 @@ __global__ void RDNA2HistogramKernel(
     const int feature = output_index & (kFeaturesPerTuple - 1);
     const int bin = output_index >> 2;
     const int group = group_base + feature;
-    if (group < num_groups && feature_used[group_feature_indices[group]] != 0) {
+    if (group < num_groups && (active_mask & (1u << feature)) != 0) {
       const uint32_t begin = group_bin_offsets[group];
       const uint32_t end = group_bin_offsets[group + 1];
       const uint32_t num_bins = end - begin;
@@ -92,8 +95,7 @@ __global__ void RDNA2HistogramSuperTileKernel(
     const score_t* hessians,
     const data_size_t* data_indices,
     const uint32_t* group_bin_offsets,
-    const int* group_feature_indices,
-    const int8_t* feature_used,
+    const uint8_t* feature4_masks,
     const data_size_t dataset_num_data,
     const data_size_t leaf_num_data,
     const int num_feature4,
@@ -105,13 +107,24 @@ __global__ void RDNA2HistogramSuperTileKernel(
   __shared__ hist_t shared_hist[kSharedEntries];
 
   const int tid = static_cast<int>(threadIdx.x);
+  const int tile = static_cast<int>(blockIdx.x);
+  const int tuple_base = tile * NUM_TUPLES;
+  uint32_t tile_active_mask = 0;
+#pragma unroll
+  for (int tuple_offset = 0; tuple_offset < NUM_TUPLES; ++tuple_offset) {
+    const int tuple = tuple_base + tuple_offset;
+    if (tuple < num_feature4) {
+      tile_active_mask |= static_cast<uint32_t>(feature4_masks[tuple]) << (tuple_offset * kFeaturesPerTuple);
+    }
+  }
+  if (tile_active_mask == 0) {
+    return;
+  }
   for (int i = tid; i < kSharedEntries; i += kHistogramThreads) {
     shared_hist[i] = 0.0;
   }
   __syncthreads();
 
-  const int tile = static_cast<int>(blockIdx.x);
-  const int tuple_base = tile * NUM_TUPLES;
   const int group_base = tuple_base * kFeaturesPerTuple;
   const int bank = (tid >> 3) & (NUM_BANKS - 1);
   const int feature_rotation = tid & (kFeaturesPerTuple - 1);
@@ -130,7 +143,7 @@ __global__ void RDNA2HistogramSuperTileKernel(
           const int local_feature = (slot + feature_rotation) & (kFeaturesPerTuple - 1);
           const int tile_feature = tuple_offset * kFeaturesPerTuple + local_feature;
           const int group = group_base + tile_feature;
-          if (group < num_groups && feature_used[group_feature_indices[group]] != 0) {
+          if (group < num_groups && (tile_active_mask & (1u << tile_feature)) != 0) {
             const uint32_t bin = (packed >> (local_feature * 8)) & 0xffu;
             const int base = bank * kEntriesPerBank + ((tile_feature * NUM_BINS + static_cast<int>(bin)) * 2);
             atomicAdd(shared_hist + base, grad);
@@ -147,7 +160,7 @@ __global__ void RDNA2HistogramSuperTileKernel(
     const int tile_feature = output_index % kTileFeatures;
     const int bin = output_index / kTileFeatures;
     const int group = group_base + tile_feature;
-    if (group < num_groups && feature_used[group_feature_indices[group]] != 0) {
+    if (group < num_groups && (tile_active_mask & (1u << tile_feature)) != 0) {
       const uint32_t begin = group_bin_offsets[group];
       const uint32_t end = group_bin_offsets[group + 1];
       const uint32_t num_bins = end - begin;
@@ -195,7 +208,7 @@ bool RDNA2HistogramEngine::ConstructHistogram(
     const std::vector<int8_t>& is_feature_used, const data_size_t* data_indices,
     data_size_t num_data, hist_t* host_histogram) {
   if ((!h64_eligible_ && !h128_eligible_) || host_histogram == nullptr || num_data <= 0 ||
-      is_feature_used.size() != feature_used_.Size()) {
+      is_feature_used.size() != static_cast<size_t>(num_features_)) {
     return false;
   }
 
@@ -205,8 +218,23 @@ bool RDNA2HistogramEngine::ConstructHistogram(
   double kernel_ms = 0.0;
   double d2h_ms = 0.0;
 #endif
-  CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(device_feature_used(), is_feature_used.data(),
-                                       is_feature_used.size() * sizeof(int8_t),
+  for (size_t tuple = 0; tuple < num_feature4_; ++tuple) {
+    uint8_t mask = 0;
+    const int group_base = static_cast<int>(tuple) * kFeaturesPerTuple;
+    for (int lane = 0; lane < kFeaturesPerTuple; ++lane) {
+      const int group = group_base + lane;
+      if (group >= static_cast<int>(host_group_feature_indices_.size())) {
+        break;
+      }
+      const int feature = host_group_feature_indices_[static_cast<size_t>(group)];
+      if (feature >= 0 && is_feature_used[static_cast<size_t>(feature)] != 0) {
+        mask |= static_cast<uint8_t>(1u << lane);
+      }
+    }
+    host_feature4_masks_[tuple] = mask;
+  }
+  CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(feature4_masks_.RawData(), host_feature4_masks_.data(),
+                                       host_feature4_masks_.size() * sizeof(uint8_t),
                                        cudaMemcpyHostToDevice, stream()));
 
   const data_size_t* device_indices = nullptr;
@@ -249,22 +277,20 @@ bool RDNA2HistogramEngine::ConstructHistogram(
     RDNA2HistogramSuperTileKernel<64, kH64SuperTileTuples, 4><<<grid, block, 0, stream()>>>(
         reinterpret_cast<const uint32_t*>(packed_features()),
         device_gradients(), device_hessians(), device_indices, group_bin_offsets(),
-        group_feature_indices(), device_feature_used(), num_data_, num_data,
-        static_cast<int>(num_feature4_), num_groups, device_histogram());
+        feature4_masks(), num_data_, num_data, static_cast<int>(num_feature4_),
+        num_groups, device_histogram());
   } else {
     const dim3 grid(static_cast<unsigned int>(num_feature4_));
     if (h64_eligible_) {
       RDNA2HistogramKernel<64, 4><<<grid, block, 0, stream()>>>(
           reinterpret_cast<const uint32_t*>(packed_features()),
           device_gradients(), device_hessians(), device_indices, group_bin_offsets(),
-          group_feature_indices(), device_feature_used(), num_data_, num_data,
-          num_groups, device_histogram());
+          feature4_masks(), num_data_, num_data, num_groups, device_histogram());
     } else {
       RDNA2HistogramKernel<128, 4><<<grid, block, 0, stream()>>>(
           reinterpret_cast<const uint32_t*>(packed_features()),
           device_gradients(), device_hessians(), device_indices, group_bin_offsets(),
-          group_feature_indices(), device_feature_used(), num_data_, num_data,
-          num_groups, device_histogram());
+          feature4_masks(), num_data_, num_data, num_groups, device_histogram());
     }
   }
 #ifdef TIMETAG

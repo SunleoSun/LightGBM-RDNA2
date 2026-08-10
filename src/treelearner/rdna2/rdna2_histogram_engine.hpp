@@ -72,6 +72,7 @@ class RDNA2HistogramEngine {
 
     train_data_ = train_data;
     num_data_ = train_data_->num_data();
+    num_features_ = train_data_->num_features();
     InvalidatePreloadedDataIndices();
     dense_feature_groups_.clear();
     dense_feature_num_bins_.clear();
@@ -92,21 +93,21 @@ class RDNA2HistogramEngine {
     }
 
     num_feature4_ = (dense_feature_groups_.size() + 3) / 4;
-    std::vector<int> host_group_feature_indices(static_cast<size_t>(num_feature_groups), -1);
+    host_group_feature_indices_.assign(static_cast<size_t>(num_feature_groups), -1);
     for (int feature = 0; feature < train_data_->num_features(); ++feature) {
       const int group = train_data_->Feature2Group(feature);
       if (group >= 0 && group < num_feature_groups) {
-        if (host_group_feature_indices[static_cast<size_t>(group)] >= 0) {
-          host_group_feature_indices[static_cast<size_t>(group)] = -2;
+        if (host_group_feature_indices_[static_cast<size_t>(group)] >= 0) {
+          host_group_feature_indices_[static_cast<size_t>(group)] = -2;
         } else {
-          host_group_feature_indices[static_cast<size_t>(group)] = feature;
+          host_group_feature_indices_[static_cast<size_t>(group)] = feature;
         }
       }
     }
     const bool all_dense_single =
         dense_feature_groups_.size() == static_cast<size_t>(num_feature_groups) &&
         !dense_feature_groups_.empty() &&
-        std::all_of(host_group_feature_indices.begin(), host_group_feature_indices.end(),
+        std::all_of(host_group_feature_indices_.begin(), host_group_feature_indices_.end(),
                     [](int feature) { return feature >= 0; });
     h64_eligible_ = all_dense_single &&
                     std::all_of(dense_feature_num_bins_.begin(), dense_feature_num_bins_.end(),
@@ -186,8 +187,8 @@ class RDNA2HistogramEngine {
     const auto packed_ready = std::chrono::steady_clock::now();
     packed_features_.Resize(host_packed.size());
     group_bin_offsets_.InitFromHostVector(host_group_bin_offsets);
-    group_feature_indices_.InitFromHostVector(host_group_feature_indices);
-    feature_used_.Resize(static_cast<size_t>(train_data_->num_features()));
+    host_feature4_masks_.resize(num_feature4_);
+    feature4_masks_.Resize(num_feature4_);
     gradients_.Resize(static_cast<size_t>(num_data_));
     hessians_.Resize(static_cast<size_t>(num_data_));
     data_indices_.Resize(static_cast<size_t>(num_data_));
@@ -281,8 +282,7 @@ class RDNA2HistogramEngine {
   size_t num_total_bins() const { return num_total_bins_; }
   const PackedFeature4* packed_features() const { return packed_features_.RawDataReadOnly(); }
   const uint32_t* group_bin_offsets() const { return group_bin_offsets_.RawDataReadOnly(); }
-  const int* group_feature_indices() const { return group_feature_indices_.RawDataReadOnly(); }
-  int8_t* device_feature_used() { return feature_used_.RawData(); }
+  const uint8_t* feature4_masks() const { return feature4_masks_.RawDataReadOnly(); }
   score_t* device_gradients() { return gradients_.RawData(); }
   score_t* device_hessians() { return hessians_.RawData(); }
   data_size_t* device_data_indices() { return data_indices_.RawData(); }
@@ -314,16 +314,18 @@ class RDNA2HistogramEngine {
 
   const Dataset* train_data_ = nullptr;
   data_size_t num_data_ = 0;
+  int num_features_ = 0;
   size_t num_feature4_ = 0;
   size_t num_total_bins_ = 0;
   bool h64_eligible_ = false;
   bool h128_eligible_ = false;
   std::vector<int> dense_feature_groups_;
   std::vector<int> dense_feature_num_bins_;
+  std::vector<int> host_group_feature_indices_;
+  std::vector<uint8_t> host_feature4_masks_;
   CUDAVector<PackedFeature4> packed_features_;
   CUDAVector<uint32_t> group_bin_offsets_;
-  CUDAVector<int> group_feature_indices_;
-  CUDAVector<int8_t> feature_used_;
+  CUDAVector<uint8_t> feature4_masks_;
   CUDAVector<score_t> gradients_;
   CUDAVector<score_t> hessians_;
   CUDAVector<data_size_t> data_indices_;
