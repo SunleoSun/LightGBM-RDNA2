@@ -199,6 +199,8 @@ void GetDeviceType(const std::unordered_map<std::string, std::string>& params, s
       *device_type = "gpu";
     } else if (value == std::string("cuda")) {
       *device_type = "cuda";
+    } else if (value == std::string("rdna2")) {
+      *device_type = "rdna2";
     } else {
       Log::Fatal("Unknown device type %s", value.c_str());
     }
@@ -282,6 +284,9 @@ void Config::Set(const std::unordered_map<std::string, std::string>& params) {
   GetDeviceType(params, &device_type);
   if (device_type == std::string("cuda")) {
     LGBM_config_::current_device = lgbm_device_cuda;
+  } else if (device_type == std::string("rdna2")) {
+    // RDNA2 keeps canonical CPU/Serial host semantics; its HIP engine owns device memory explicitly.
+    LGBM_config_::current_device = lgbm_device_cpu;
   }
   GetTreeLearnerType(params, &tree_learner);
 
@@ -421,6 +426,10 @@ void Config::CheckParamConflict(const std::unordered_map<std::string, std::strin
     if (deterministic) {
       Log::Warning("Although \"deterministic\" is set, the results ran by GPU may be non-deterministic.");
     }
+  } else if (device_type == std::string("rdna2")) {
+    // RDNA2 starts from Serial/OpenCL-style host semantics and a col-wise canonical dataset view.
+    force_col_wise = true;
+    force_row_wise = false;
   }
   // linear tree learner must be serial type and run on CPU device
   if (linear_tree) {

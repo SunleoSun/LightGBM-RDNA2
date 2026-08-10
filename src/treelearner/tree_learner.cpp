@@ -11,6 +11,9 @@
 #include "parallel_tree_learner.h"
 #include "serial_tree_learner.h"
 #include "cuda/cuda_single_gpu_tree_learner.hpp"
+#ifdef USE_ROCM
+#include "rdna2/rdna2_tree_learner.hpp"
+#endif
 
 namespace LightGBM {
 
@@ -50,6 +53,16 @@ TreeLearner* TreeLearner::CreateTreeLearner(const std::string& learner_type, con
     } else {
       Log::Fatal("Currently cuda version only supports training on a single machine.");
     }
+  } else if (device_type == std::string("rdna2")) {
+#ifdef USE_ROCM
+    if (learner_type == std::string("serial")) {
+      return new RDNA2TreeLearner(config);
+    } else {
+      Log::Fatal("Currently rdna2 version only supports serial single-machine training.");
+    }
+#else
+    Log::Fatal("RDNA2 tree learner requires a build with USE_ROCM=ON.");
+#endif
   }
   return nullptr;
 }

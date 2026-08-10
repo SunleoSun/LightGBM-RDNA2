@@ -8,7 +8,9 @@ This ordering now follows a revised production boundary. The current `CUDASingle
 
 ## Phase 0 - establish the RDNA2 backend boundary
 
-Add `device_type=rdna2` without changing upstream `cpu`, `gpu`, or `cuda` contracts. Route RDNA2 training through Serial/OpenCL-style objective, score, split-selection, leaf bookkeeping, and subtraction semantics. Reuse the same Dataset/BinMapper representation and offload histogram construction only. The benchmark already proves that CPU, legacy OpenCL, and ROCm consume the same CPU-produced `.bin`; dataset rebucketing is not the current divergence source.
+`device_type=rdna2` is now implemented without changing upstream `cpu`, `gpu`, or `cuda` contracts. `RDNA2TreeLearner` derives from `SerialTreeLearner`; its histogram override currently delegates to the canonical Serial implementation, so objective, score, split-selection, leaf bookkeeping, subtraction, and histogram semantics are all an exact correctness baseline. The native ROCm smoke suite passes all H64/H128, weighted-binary, and regression profiles with prediction diff `0` and exact tree text/structure against the LightGBM 4.7 CPU reference. This is the semantic boundary that the HIP histogram engine must preserve.
+
+The benchmark already proves that CPU, legacy OpenCL, and RDNA2 consume the same CPU-produced `.bin`; dataset rebucketing is not the current divergence source. RDNA2 uses a col-wise canonical dataset view and deliberately keeps `LGBM_config_::current_device` on CPU so generic CUDA objective/host-allocation semantics do not leak into the backend.
 
 Keep the existing gfx1030 feature4 guard in the CUDA/HIP diagnostic path: the old feature4 kernel is valid only when the selected partition contains at most four columns. H64/H128 bypass it while H256 can retain the proven fast path. The generic HIP fallback is still useful as a diagnostic baseline but should not define RDNA2 correctness semantics.
 
@@ -63,4 +65,4 @@ Possible later work is feature-tile histogram -> prefix/gain evaluation while da
 5. Retain an H256 regression check while the historical feature4 path remains reachable.
 6. Compare kernel timers, total training time, tree structure, predictions, AUC/RMSE, and tree count. Performance without correctness is discarded.
 
-The immediate next engineering task is Phase 0: implement the `rdna2` routing and learner boundary, then prove a minimal RDNA2 histogram path against the strict smoke suite before porting the H64/H128 OpenCL-style kernels onto it.
+The immediate next engineering task is Phase 1: introduce `RDNA2HistogramEngine` behind the proven `RDNA2TreeLearner::ConstructHistograms` boundary, initially with a correctness-safe fallback, then offload H64 histogram construction and require the same strict smoke result before H128 or packing optimizations.

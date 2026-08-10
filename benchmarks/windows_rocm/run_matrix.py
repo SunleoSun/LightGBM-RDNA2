@@ -91,11 +91,11 @@ def main() -> int:
                     if item["summary"] is not None else False
                 ),
                 "config": item["summary"]["config"] if item["summary"] is not None else None,
-                "rocm": next(
-                    (r for r in item["summary"]["results"] if r["name"] == "v470_rocm_gpu"), None
+                "rdna2": next(
+                    (r for r in item["summary"]["results"] if r["name"] == "v470_rdna2"), None
                 ) if item["summary"] is not None else None,
-                "rocm_comparison": next(
-                    (r for r in item["summary"]["comparison"]["comparisons"] if r["name"] == "v470_rocm_gpu"), None
+                "rdna2_comparison": next(
+                    (r for r in item["summary"]["comparison"]["comparisons"] if r["name"] == "v470_rdna2"), None
                 ) if item["summary"] is not None else None,
             }
             for item in results
@@ -107,12 +107,12 @@ def main() -> int:
 
     print("\n=== MATRIX SUMMARY ===")
     for item in matrix["results"]:
-        rocm = item["rocm"] or {}
-        cmp = item["rocm_comparison"] or {}
-        metric = rocm.get("auc") if rocm.get("auc") is not None else rocm.get("rmse")
+        rdna2 = item["rdna2"] or {}
+        cmp = item["rdna2_comparison"] or {}
+        metric = rdna2.get("auc") if rdna2.get("auc") is not None else rdna2.get("rmse")
         print(
             f"{item['profile']:<20} correctness={str(item['correctness']):<5} "
-            f"iter_ms={rocm.get('iteration_ms', float('nan')):8.3f} "
+            f"iter_ms={rdna2.get('iteration_ms', float('nan')):8.3f} "
             f"metric={metric if metric is not None else float('nan'):.8f} "
             f"pred_diff={cmp.get('prediction_max_abs_diff', float('nan')):.3g} "
             f"struct={cmp.get('tree_structure_match')}"

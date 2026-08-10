@@ -79,7 +79,8 @@ def main() -> int:
 
     payload = np.load(args.valid_npz)
     x_valid = np.ascontiguousarray(payload["X"], dtype=np.float32)
-    y_valid = np.asarray(payload["y"], dtype=np.int8)
+    y_dtype = np.int8 if profile["objective"] == "binary" else np.float64
+    y_valid = np.asarray(payload["y"], dtype=y_dtype)
 
     lib = C.CDLL(str(Path(args.dll).resolve()))
     bind(lib)

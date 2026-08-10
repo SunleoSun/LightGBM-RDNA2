@@ -17,4 +17,4 @@ The expected long-term component shape is conceptually:
 
 `RDNA2TreeLearner(Serial semantics) -> RDNA2HistogramEngine -> PackedDataset, H64, H128, Root, IndexedLeaf, WaveHistogramPrimitive, Merge/Subtract`
 
-Generic CUDA behavior remains available for `device_type=cuda`; legacy OpenCL remains `device_type=gpu`. The fork-specific `rdna2` path should not silently change either upstream contract. H64 and H128 kernels should be compile-time specialized rather than routed through a universal 256-bin implementation.
+Generic CUDA behavior remains available for `device_type=cuda`; legacy OpenCL remains `device_type=gpu`. The fork-specific `rdna2` path should not silently change either upstream contract. H64 and H128 kernels should be compile-time specialized rather than routed through a universal 256-bin implementation. Dataset ownership and future packing/cache work are defined separately in `dataset/rdna2-dataset-architecture`; canonical `BinMapper` semantics remain authoritative even when the physical RDNA2 layout diverges.

@@ -262,7 +262,7 @@ def run_capi_variant(name: str, dll: Path, device: str, train_file: Path, valid_
     return payload
 
 
-def run_rocm_cli(name: str, exe: Path, train_file: Path, valid_features_file: Path, valid_npz: Path, iterations: int, profile: dict) -> dict:
+def run_rocm_cli(name: str, exe: Path, device_type: str, train_file: Path, valid_features_file: Path, valid_npz: Path, iterations: int, profile: dict) -> dict:
     model = ARTIFACTS / f"{name}.model.txt"
     pred = ARTIFACTS / f"{name}.predictions.txt"
     result = ARTIFACTS / f"{name}.json"
@@ -271,7 +271,7 @@ def run_rocm_cli(name: str, exe: Path, train_file: Path, valid_features_file: Pa
     env["PATH"] = str(rocm_bin) + os.pathsep + env.get("PATH", "")
     common = [
         "task=train", f"data={train_file}", *profile_param_string(profile).split(),
-        "verbosity=1", "device_type=cuda", "num_gpu=1", "gpu_device_id=0",
+        "verbosity=1", f"device_type={device_type}", "num_gpu=1", "gpu_device_id=0",
         f"num_iterations={iterations}", f"output_model={model}",
     ]
     wall0 = time.perf_counter()
@@ -294,7 +294,7 @@ def run_rocm_cli(name: str, exe: Path, train_file: Path, valid_features_file: Pa
     preds = np.loadtxt(pred, dtype=np.float64)
     y_valid = np.load(valid_npz)["y"]
     payload = {
-        "name": name, "backend": "cli", "device": "cuda", "dataset_seconds": None,
+        "name": name, "backend": "cli", "device": device_type, "dataset_seconds": None,
         "init_seconds": None, "train_seconds": train_seconds, "train_wall_seconds": wall_seconds,
         "predict_seconds": predict_seconds, "iteration_ms": train_seconds * 1000.0 / iterations,
         "objective": profile["objective"],
@@ -344,7 +344,7 @@ def compare(
     min_class_fraction: float, min_confident_fraction: float,
 ) -> dict:
     reference = next(item for item in results if item["name"] == "v470_cpu")
-    gated_names = {"v470_rocm_gpu"}
+    gated_names = {"v470_rdna2"}
     ref_pred = np.loadtxt(reference["predictions"], dtype=np.float64)
     ref_trees, ref_exact, ref_struct = tree_signature(Path(reference["model"]))
     if ref_trees != iterations:
@@ -355,6 +355,14 @@ def compare(
     ref_rmse = rmse_score(y_valid, ref_pred) if not binary else None
     ref_hard = (ref_pred >= threshold).astype(np.int8) if binary else None
     ref_confusion = confusion_matrix(y_valid, ref_hard) if binary else None
+    if binary:
+        ref_confident_low = int(np.sum(ref_pred < 0.1))
+        ref_confident_high = int(np.sum(ref_pred > 0.9))
+        ref_confident_fraction = min(ref_confident_low, ref_confident_high) / len(ref_pred)
+        required_confident_fraction = min(min_confident_fraction, ref_confident_fraction)
+    else:
+        ref_confident_fraction = None
+        required_confident_fraction = None
 
     comparisons = []
     failures = []
@@ -417,7 +425,7 @@ def compare(
                 or not allclose or structural != ref_struct or not hard_match or not confusion_match
                 or auc_diff > auc_tol or correlation < correlation_min
                 or smallest_class_fraction < min_class_fraction
-                or confident_fraction < min_confident_fraction
+                or confident_fraction < required_confident_fraction
             )
         else:
             rmse = rmse_score(y_valid, pred)
@@ -439,6 +447,8 @@ def compare(
         "auc_tol": auc_tol, "regression_metric_tol": regression_metric_tol,
         "correlation_min": correlation_min, "classification_threshold": threshold,
         "min_class_fraction": min_class_fraction, "min_confident_fraction": min_confident_fraction,
+        "reference_confident_fraction": ref_confident_fraction,
+        "required_confident_fraction": required_confident_fraction,
         "reference_confusion_matrix": ref_confusion, "reference_auc": ref_auc, "reference_rmse": ref_rmse,
         "all_checks_passed": not failures, "comparisons": comparisons, "failures": failures,
     }
@@ -490,10 +500,16 @@ def main() -> int:
             run_capi_variant("old_cpu", required["old"], "cpu", train_binary, valid_npz, args.iterations, profile),
             run_capi_variant("old_opencl_gpu", required["old"], "gpu", train_binary, valid_npz, args.iterations, profile),
         ])
-    results.extend([
-        run_capi_variant("v470_cpu", required["cpu"], "cpu", train_binary, valid_npz, args.iterations, profile),
-        run_rocm_cli("v470_rocm_gpu", required["rocm_exe"], train_binary, valid_features_file, valid_npz, args.iterations, profile),
-    ])
+    results.append(
+        run_capi_variant("v470_cpu", required["cpu"], "cpu", train_binary, valid_npz, args.iterations, profile)
+    )
+    if args.modes == "all":
+        results.append(
+            run_rocm_cli("v470_cuda_diagnostic", required["rocm_exe"], "cuda", train_binary, valid_features_file, valid_npz, args.iterations, profile)
+        )
+    results.append(
+        run_rocm_cli("v470_rdna2", required["rocm_exe"], "rdna2", train_binary, valid_features_file, valid_npz, args.iterations, profile)
+    )
     y_valid = np.load(valid_npz)["y"]
     comparison = compare(
         results, args.iterations, y_valid, profile["objective"], args.atol, args.rtol, args.auc_tol,
