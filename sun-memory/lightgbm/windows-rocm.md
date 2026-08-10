@@ -31,7 +31,9 @@ The harness has production-oriented profiles:
 
 Binary datasets are keyed by max_bin because bin boundaries are encoded in the LightGBM binary dataset. Never reuse a max_bin=255 binary dataset when measuring H64/H128 behavior.
 
-Correctness is mandatory before accepting performance work. The gate checks finite probability outputs, probability range/non-constancy, requested tree count, tree structure, AUC agreement, tight prediction agreement/correlation, identical hard labels at 0.5, and identical confusion matrix. Tiny serialized model text differences are not alone a failure if the structural and prediction gates pass.
+Correctness is mandatory before accepting performance work. ROCm is gated against LightGBM 4.7 CPU, not the older DLL, because CPU and HIP must share the same source-version semantics. The legacy CPU/OpenCL modes remain compatibility and performance references. Binary checks cover finite probability outputs, probability range/non-constancy, requested tree count, tree structure, AUC, tight prediction agreement/correlation, identical hard labels at 0.5, and identical confusion matrix. Regression checks cover finite/nonconstant predictions, tree count/structure, prediction agreement/correlation, and RMSE.
+
+A strict matrix now covers H64/H128 baselines, no-bagging variants, feature_fraction=0.5, strong regularization, scale_pos_weight=16, and regression_l2. Smoke uses six representative profiles at 20 trees; stress covers all twelve at 20 trees; production uses H64/H128 at 100 trees. On the current gfx1030 feature4 implementation all twelve production-sized stress profiles fail against v4.7 CPU, including regression_l2, so the defect is not specific to binary probability conversion or class weighting. H128 with scale_pos_weight=16 can degenerate to a one-tree ROCm model. This makes restoration of H64/H128 correctness the first requirement of the new histogram architecture.
 
 ## Confirmed architecture observations
 

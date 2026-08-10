@@ -7,6 +7,9 @@ param(
     [int]$Iterations = 100,
     [ValidateSet('h64', 'h128', 'all')]
     [string]$Profile = 'all',
+    [ValidateSet('production', 'smoke', 'stress', 'single')]
+    [string]$Suite = 'production',
+    [int]$MatrixIterations = 0,
     [double]$PredictionAtol = 1e-6,
     [double]$PredictionRtol = 1e-6
 )
@@ -57,12 +60,19 @@ Copy-Item -Force $rocmExe (Join-Path $Bin 'lightgbm_4.7.0_rocm.exe')
 
 Write-Host '=== Benchmark and correctness checks ==='
 $env:ROCM_PATH = $RocmPath
-$profiles = if ($Profile -eq 'all') { @('h64', 'h128') } else { @($Profile) }
-$benchmarkFailed = $false
-foreach ($benchmarkProfile in $profiles) {
-    Write-Host "=== Profile $benchmarkProfile ==="
-    & $Python (Join-Path $PSScriptRoot 'run_benchmarks.py') --profile $benchmarkProfile --train-rows $TrainRows --valid-rows $ValidRows --features $Features --iterations $Iterations --atol $PredictionAtol --rtol $PredictionRtol
-    if ($LASTEXITCODE -ne 0) { $benchmarkFailed = $true }
+if ($Suite -eq 'single') {
+    $profiles = if ($Profile -eq 'all') { @('h64', 'h128') } else { @($Profile) }
+    $benchmarkFailed = $false
+    foreach ($benchmarkProfile in $profiles) {
+        Write-Host "=== Profile $benchmarkProfile ==="
+        & $Python (Join-Path $PSScriptRoot 'run_benchmarks.py') --profile $benchmarkProfile --train-rows $TrainRows --valid-rows $ValidRows --features $Features --iterations $Iterations --atol $PredictionAtol --rtol $PredictionRtol
+        if ($LASTEXITCODE -ne 0) { $benchmarkFailed = $true }
+    }
+    if ($benchmarkFailed) { exit 2 }
+    exit 0
 }
-if ($benchmarkFailed) { exit 2 }
-exit 0
+
+$matrixArgs = @((Join-Path $PSScriptRoot 'run_matrix.py'), '--suite', $Suite, '--train-rows', $TrainRows, '--valid-rows', $ValidRows, '--features', $Features)
+if ($MatrixIterations -gt 0) { $matrixArgs += @('--iterations', $MatrixIterations) }
+& $Python @matrixArgs
+exit $LASTEXITCODE

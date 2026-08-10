@@ -14,6 +14,12 @@ C_API_PREDICT_NORMAL = 0
 C_API_FEATURE_IMPORTANCE_SPLIT = 0
 
 
+def rmse_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    y = np.asarray(y_true, dtype=np.float64)
+    pred = np.asarray(y_pred, dtype=np.float64)
+    return float(np.sqrt(np.mean((pred - y) ** 2)))
+
+
 def auc_score(y_true: np.ndarray, y_score: np.ndarray) -> float:
     y_true = np.asarray(y_true, dtype=np.int8)
     y_score = np.asarray(y_score, dtype=np.float64)
@@ -85,7 +91,7 @@ def main() -> int:
     else:
         dataset_params = f"header=false label_column=0 max_bin={int(profile['max_bin'])} feature_pre_filter=false".encode()
     common = " ".join([
-        "objective=binary", "metric=auc",
+        f"objective={profile['objective']}", f"metric={profile['metric']}",
         f"learning_rate={profile['learning_rate']}", f"num_leaves={profile['num_leaves']}",
         f"max_depth={profile['max_depth']}", f"min_data_in_leaf={profile['min_data_in_leaf']}",
         f"max_bin={profile['max_bin']}", f"feature_fraction={profile['feature_fraction']}",
@@ -96,6 +102,8 @@ def main() -> int:
         "bagging_seed=20260809", "data_random_seed=20260809",
         "deterministic=true", "force_col_wise=true",
     ])
+    if profile["objective"] == "binary":
+        common += f" scale_pos_weight={profile['scale_pos_weight']}"
     if args.device == "cpu":
         device_params = "device_type=cpu"
     else:
@@ -144,7 +152,9 @@ def main() -> int:
             "train_seconds": train_seconds,
             "predict_seconds": predict_seconds,
             "iteration_ms": train_seconds * 1000.0 / args.iterations,
-            "auc": auc_score(y_valid, preds),
+            "objective": profile["objective"],
+            "auc": auc_score(y_valid, preds) if profile["objective"] == "binary" else None,
+            "rmse": rmse_score(y_valid, preds) if profile["objective"] != "binary" else None,
             "prediction_min": float(preds.min()),
             "prediction_max": float(preds.max()),
             "prediction_std": float(preds.std()),

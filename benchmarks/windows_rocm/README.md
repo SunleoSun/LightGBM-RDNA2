@@ -1,29 +1,57 @@
 # Windows CPU / OpenCL / ROCm benchmark
 
-This harness builds LightGBM 4.7.0 and runs the same deterministic binary-classification workload through four modes: legacy DLL CPU, legacy DLL OpenCL `gpu`, LightGBM 4.7.0 CPU, and native Windows HIP/ROCm using `device_type=cuda`.
+This harness validates and times the same LightGBM training workload through legacy CPU, legacy OpenCL GPU, LightGBM 4.7 CPU, and native Windows HIP/ROCm. The default dataset shape is 40,000 training rows, 50,000 validation rows, and 3,000 features.
 
-The default dataset is intentionally very wide: 40,000 training rows, 50,000 validation rows, and 3,000 features. The harness now has two production-oriented histogram profiles instead of the old `max_bin=255` microbenchmark.
+## Canonical reference
 
-- `h64` models Stage 1: `max_bin=63`, `max_depth=6`, `num_leaves=40`, `min_data_in_leaf=50`, `feature_fraction=0.9`, `bagging_fraction=0.7`, `bagging_freq=1`, and `learning_rate=0.075`. `num_leaves=40` is a representative resolved value matching the `balanced_small` depth-6 profile; it can be changed later if the Stage 1 resolver commonly chooses another value.
-- `h128` models a representative Stage 2 depth-6 case: `max_bin=127`, `max_depth=6`, `num_leaves=40`, `min_data_in_leaf=50`, `feature_fraction=1.0`, `bagging_fraction=0.9`, `bagging_freq=1`, `lambda_l1=lambda_l2=0.1`, and `learning_rate=0.05`. Stage 2 is dynamic, so this profile is a stable H128 architecture benchmark rather than a claim that every Optuna trial uses these exact regularization values.
+Correctness of the ROCm backend is gated against **LightGBM 4.7 CPU**, because it is the same source version as the HIP backend. The legacy CPU/OpenCL modes remain in every profile as compatibility and performance references, but differences caused by the older LightGBM version do not fail the ROCm correctness gate.
 
-Run both profiles from PowerShell:
+For binary objectives the gate requires finite, non-constant probabilities in `[0, 1]`, requested tree count, matching tree structure, `allclose` predictions, near-perfect Pearson correlation, AUC agreement, identical hard labels at 0.5, and identical confusion matrix. For L2 regression it requires finite non-constant predictions, requested tree count, matching tree structure, `allclose` predictions, near-perfect correlation, and RMSE agreement.
+
+## Production profiles
+
+- `h64`: Stage-1-like `max_bin=63`, depth 6, 40 leaves, `min_data_in_leaf=50`, `feature_fraction=0.9`, `bagging_fraction=0.7`, `bagging_freq=1`, learning rate 0.075.
+- `h128`: representative Stage-2 `max_bin=127`, depth 6, 40 leaves, `min_data_in_leaf=50`, `feature_fraction=1.0`, `bagging_fraction=0.9`, light L1/L2 regularization, learning rate 0.05.
+
+Binary LightGBM datasets are keyed by objective and `max_bin`, because binning is encoded when the dataset is serialized. H64, H128, binary, and regression runs therefore never silently reuse an incompatible `.bin` file.
+
+## Strict correctness matrix
+
+The strict matrix deliberately changes dimensions that exercise different histogram/index/gradient behavior:
+
+- baseline H64 and H128;
+- no-bagging variants (`subsample=1.0`);
+- feature sampling (`feature_fraction=0.5`);
+- strong regularization (`min_data_in_leaf=100`, L1/L2=1, `min_gain_to_split=0.005`, `path_smooth=1`);
+- strong binary class weighting (`scale_pos_weight=16`);
+- `regression_l2` for both H64 and H128, which changes gradient/Hessian semantics and removes binary-probability-specific checks.
+
+Suites:
 
 ```powershell
-.\benchmarks\windows_rocm\build_and_benchmark.ps1
+# Fast development gate: six representative profiles, 20 trees each.
+python .\benchmarks\windows_rocm\run_matrix.py --suite smoke
+
+# Real timing: H64 + H128, 100 trees each.
+python .\benchmarks\windows_rocm\run_matrix.py --suite production
+
+# Full correctness sweep: every variant, 20 trees each.
+python .\benchmarks\windows_rocm\run_matrix.py --suite stress
 ```
 
-Run only one histogram width:
+The build wrapper can build and run the same suites:
 
 ```powershell
-.\benchmarks\windows_rocm\build_and_benchmark.ps1 -Profile h64
-.\benchmarks\windows_rocm\build_and_benchmark.ps1 -Profile h128
+.\benchmarks\windows_rocm\build_and_benchmark.ps1 -Suite smoke
+.\benchmarks\windows_rocm\build_and_benchmark.ps1 -Suite production
+.\benchmarks\windows_rocm\build_and_benchmark.ps1 -Suite stress
+
+# Backward-compatible direct H64/H128 run with explicit tree count.
+.\benchmarks\windows_rocm\build_and_benchmark.ps1 -Suite single -Profile h64 -Iterations 100
 ```
 
-The generated LightGBM binary dataset is keyed by `max_bin` (`..._maxbin63.bin` and `..._maxbin127.bin`). This is required because bin boundaries are encoded when the binary dataset is created; reusing a `max_bin=255` binary would not exercise the H64/H128 kernels correctly. All four modes consume the same binary dataset within each profile.
+`-MatrixIterations N` overrides the suite default when using the build wrapper. Smoke/stress default to 20 trees; production defaults to 100.
 
-Artifacts are separated into `artifacts/h64/` and `artifacts/h128/`. Each `summary.json` records the complete profile, timings, AUC, prediction ranges, prediction differences against the legacy CPU reference, tree counts, exact tree-text equality, and a structural tree signature.
+Artifacts for each profile are written under `artifacts/<profile>/`. Matrix summaries are written to `artifacts/matrix_smoke.json`, `matrix_production.json`, or `matrix_stress.json`.
 
-For binary classification, saved predictions are probabilities. The correctness gate requires finite, non-constant probabilities in `[0, 1]`, exactly the requested number of trees, matching tree structure, probability agreement with the legacy CPU reference, near-perfect Pearson correlation, AUC agreement within `5e-8`, identical hard labels at threshold `0.5`, and an identical confusion matrix. Exact serialized tree equality is reported but is not a hard failure because CPU, OpenCL, and HIP reductions can differ by tiny floating-point values while retaining the same structure and predictions.
-
-Native Windows ROCm currently uses the CLI for the fourth mode because the experimental HIP `_lightgbm.dll` still has a C-API initialization crash on `device_type=cuda`; the CLI executes the same LightGBM CUDA/HIP training path.
+Native Windows ROCm currently uses the CLI because the experimental HIP `_lightgbm.dll` still crashes during C-API booster creation with `device_type=cuda`; the CLI executes the same CUDA/HIP training path.
