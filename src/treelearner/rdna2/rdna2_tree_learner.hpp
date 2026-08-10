@@ -31,12 +31,15 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
   void Init(const Dataset* train_data, bool is_constant_hessian) override {
     SerialTreeLearner::Init(train_data, is_constant_hessian);
     histogram_engine_.Init(train_data, config_->gpu_device_id);
+    histogram_engine_.RegisterDataIndices(data_partition_->indices(), static_cast<size_t>(num_data_));
   }
 
   void ResetTrainingDataInner(const Dataset* train_data, bool is_constant_hessian,
                               bool reset_multi_val_bin) override {
+    histogram_engine_.UnregisterDataIndices();
     SerialTreeLearner::ResetTrainingDataInner(train_data, is_constant_hessian, reset_multi_val_bin);
     histogram_engine_.Init(train_data, config_->gpu_device_id);
+    histogram_engine_.RegisterDataIndices(data_partition_->indices(), static_cast<size_t>(num_data_));
   }
 
  protected:

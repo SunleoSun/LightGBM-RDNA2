@@ -40,6 +40,7 @@ class RDNA2HistogramEngine {
     if (stream_ != nullptr) {
       SynchronizeCUDAStream(stream_, __FILE__, __LINE__);
     }
+    UnregisterDataIndices();
     for (auto* ptr : registered_histogram_buffers_) {
       CUDASUCCESS_OR_FATAL(cudaHostUnregister(ptr));
     }
@@ -208,6 +209,30 @@ class RDNA2HistogramEngine {
   bool ConstructHistogram(const std::vector<int8_t>& is_feature_used, const data_size_t* data_indices,
                           data_size_t num_data, hist_t* host_histogram);
 
+  void RegisterDataIndices(const data_size_t* data_indices, size_t count) {
+    UnregisterDataIndices();
+    if (data_indices == nullptr || count == 0) {
+      return;
+    }
+    const cudaError_t err = cudaHostRegister(const_cast<data_size_t*>(data_indices),
+                                             count * sizeof(data_size_t), cudaHostRegisterPortable);
+    if (err != cudaSuccess) {
+      Log::Warning("RDNA2 could not pin DataPartition indices; leaf-index H2D will use pageable memory: %s",
+                   cudaGetErrorString(err));
+      return;
+    }
+    registered_data_indices_ = data_indices;
+    registered_data_indices_count_ = count;
+  }
+
+  void UnregisterDataIndices() {
+    if (registered_data_indices_ != nullptr) {
+      CUDASUCCESS_OR_FATAL(cudaHostUnregister(const_cast<data_size_t*>(registered_data_indices_)));
+      registered_data_indices_ = nullptr;
+      registered_data_indices_count_ = 0;
+    }
+  }
+
   bool EnsureCanonicalHistogramPinned(hist_t* host_histogram) {
     if (registered_histogram_buffers_.find(host_histogram) != registered_histogram_buffers_.end()) {
       return true;
@@ -275,6 +300,8 @@ class RDNA2HistogramEngine {
   size_t host_histogram_staging_size_ = 0;
   cudaStream_t stream_ = nullptr;
   std::unordered_set<hist_t*> registered_histogram_buffers_;
+  const data_size_t* registered_data_indices_ = nullptr;
+  size_t registered_data_indices_count_ = 0;
 #ifdef TIMETAG
   uint64_t profile_histogram_calls_ = 0;
   double profile_grad_h2d_ms_ = 0.0;
