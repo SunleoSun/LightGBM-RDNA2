@@ -1,22 +1,24 @@
 ---
-description: Source-grounded optimization order for RX 6800 XT gfx1030, from correctness containment through H64/H128, SuperTile, wave32, subtraction, and split fusion.
+description: Source-grounded optimization order for RX 6800 XT gfx1030, from safe dispatch through H64/H128 reference kernels, SuperTile, wave32, subtraction, and split fusion.
 ---
 
 # RX 6800 XT optimization roadmap
 
 This ordering follows the actual production path and keeps each performance stage behind a correctness gate. The dominant owner is `CUDAHistogramConstructor`; `CUDARowData` owns dense row packing/feature partitions, and `CUDABestSplitFinder` remains a later consumer of the durable histograms.
 
-## Phase 0 - restore a trustworthy baseline
+## Phase 0 - contain broken specialization and establish the diagnostic baseline
 
-Contain the existing gfx1030 feature4 kernel to its real invariant: at most four columns in every selected partition. H64/H128 currently produce wider partitions because the 2048-float shared-hist budget maps to 1024 bins, allowing roughly 16 H64 or 8 H128 columns. Until a specialized kernel exists, H64/H128 should use a correctness-safe fallback. Run smoke immediately after this containment and then the strict matrix before using ROCm timing numbers.
+The old gfx1030 feature4 kernel is valid only when the selected partition contains at most four columns. Enforce that at dispatch and assert it at launch. This preserves the proven H256 fast path while H64/H128 bypass it. Do not force H64/H128 partitions down to four columns merely to make them enter feature4; that reuses the wrong architecture instead of fixing the production workload.
 
-Add narrow diagnostics or assertions around partition width, bin count, and selected kernel path so future specialization cannot silently receive an incompatible row layout. The kernel-dispatch contract should encode H64/H128/H256 meaning explicitly instead of inferring semantics only from `bit_type == 8` and architecture.
+The generic HIP fallback is a diagnostic baseline, not a strict-correctness reference. After bypassing feature4 it removes the catastrophic H64/H128 corruption, but strict CPU equality still fails on late splits. H128 regression is especially informative: the first five trees match CPU and the sixth differs only at its final split. Use this baseline to distinguish gross mapping/layout defects from smaller numerical or split-selection differences.
+
+The August 9 synchronization reductions and gfx1030 grid/data-per-thread tuning have been rollback-tested and do not change this residual mismatch, so they remain enabled. A separate CUDA binary-objective class-weight indexing bug has been fixed and should stay independent of histogram work.
 
 ## Phase 1 - H64 OpenCL-style reference
 
 Implement a dedicated dense H64 HIP kernel for gfx1030. Preserve existing LightGBM histogram offsets, missing/default-bin fixup, smaller-child ownership, and subtraction semantics. Use the proven OpenCL `histogram64.cl` as the architectural reference: 256 threads, packed four-feature reads, four LDS banks, bank-aware `(bin, bank, G/H, feature)` placement, lane feature rotation, software prefetch, root/no-index specialization, and optional constant-Hessian handling.
 
-The first H64 milestone is smoke correctness, not speed. Then run production H64 and compare both total tree time and histogram timer against LightGBM 4.7 CPU and the legacy OpenCL reference.
+The first H64 milestone is correctness against the LightGBM 4.7 CPU reference and comparison against legacy OpenCL, not peak speed. Because generic HIP can differ on late near-tie splits, inspect the first divergent split rather than assuming every non-bit-identical result is a layout bug. The specialized reference should aim to reproduce the proven OpenCL accumulation/layout behavior closely enough to pass the strict project gate.
 
 ## Phase 2 - dedicated H128 reference
 
@@ -58,6 +60,7 @@ Possible later work is feature-tile histogram -> prefix/gain evaluation while da
 2. Full smoke suite (`h64`, `h128`, `h64_scale16`, `h128_regression`).
 3. Production H64/H128 only when smoke passes.
 4. Full strict stress matrix before merging a completed architectural stage.
-5. Compare kernel timers, total training time, tree structure, predictions, AUC/RMSE, and tree count. Performance without correctness is discarded.
+5. Retain an H256 regression check while the historical feature4 path remains reachable.
+6. Compare kernel timers, total training time, tree structure, predictions, AUC/RMSE, and tree count. Performance without correctness is discarded.
 
-The immediate next engineering task is Phase 0 followed by Phase 1: fix the feature4 dispatch invariant, establish a correct ROCm H64 baseline, then implement the dedicated H64 reference kernel.
+The immediate next engineering task is Phase 1: build a dedicated H64 OpenCL-style reference path on top of the now-contained feature4 dispatch, using the generic HIP results only as a diagnostic control.

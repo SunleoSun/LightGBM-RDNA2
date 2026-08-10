@@ -135,13 +135,14 @@ __global__ void GetGradientsKernel_BinaryLogloss(const double* cuda_scores, cons
   score_t* cuda_out_gradients, score_t* cuda_out_hessians) {
   const data_size_t data_index = static_cast<data_size_t>(blockDim.x * blockIdx.x + threadIdx.x);
   if (data_index < num_data) {
-    const label_t cuda_label = static_cast<int>(cuda_labels[data_index]);
-    const int label = cuda_label > 0 ? 1 : -1;
+    const label_t cuda_label = cuda_labels[data_index];
+    const int is_pos = cuda_label > 0 ? 1 : 0;
+    const int label = is_pos != 0 ? 1 : -1;
     const double response = -label * sigmoid / (1.0f + exp(label * sigmoid * cuda_scores[data_index]));
     const double abs_response = fabs(response);
     if (!USE_WEIGHT) {
       if (USE_LABEL_WEIGHT) {
-        const double label_weight = cuda_label_weights[label];
+        const double label_weight = cuda_label_weights[is_pos];
         cuda_out_gradients[data_index] = static_cast<score_t>(response * label_weight);
         cuda_out_hessians[data_index] = static_cast<score_t>(abs_response * (sigmoid - abs_response) * label_weight);
       } else {
@@ -151,7 +152,7 @@ __global__ void GetGradientsKernel_BinaryLogloss(const double* cuda_scores, cons
     } else {
       const double sample_weight = cuda_weights[data_index];
       if (USE_LABEL_WEIGHT) {
-        const double label_weight = cuda_label_weights[label];
+        const double label_weight = cuda_label_weights[is_pos];
         cuda_out_gradients[data_index] = static_cast<score_t>(response * label_weight * sample_weight);
         cuda_out_hessians[data_index] = static_cast<score_t>(abs_response * (sigmoid - abs_response) * label_weight * sample_weight);
       } else {

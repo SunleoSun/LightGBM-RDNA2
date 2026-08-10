@@ -602,6 +602,7 @@ void CUDAHistogramConstructor::LaunchConstructHistogramKernel(
       cuda_row_data_->bit_type() == 8 &&
       !cuda_row_data_->is_sparse() &&
       cuda_row_data_->NumLargeBinPartition() == 0 &&
+      cuda_row_data_->max_num_column_per_partition() <= GFX1030_FEATURE4_NUM_FEATURES &&
       !gpu_use_dp_ &&
       !use_quantized_grad_) {
     LaunchConstructHistogramGfx1030Feature4Kernel(cuda_smaller_leaf_splits, num_data_in_smaller_leaf);
@@ -619,6 +620,7 @@ void CUDAHistogramConstructor::LaunchConstructHistogramKernel(
 void CUDAHistogramConstructor::LaunchConstructHistogramGfx1030Feature4Kernel(
   const CUDALeafSplitsStruct* cuda_smaller_leaf_splits,
   const data_size_t num_data_in_smaller_leaf) {
+  CHECK_LE(cuda_row_data_->max_num_column_per_partition(), GFX1030_FEATURE4_NUM_FEATURES);
   const int grid_dim_x = cuda_row_data_->num_feature_partitions();
   const int calculated_grid_dim_y =
     ((num_data_in_smaller_leaf + num_data_per_thread_ - 1) / num_data_per_thread_ + GFX1030_FEATURE4_BLOCK_SIZE - 1) / GFX1030_FEATURE4_BLOCK_SIZE;
