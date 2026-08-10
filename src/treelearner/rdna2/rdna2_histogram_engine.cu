@@ -238,14 +238,6 @@ bool RDNA2HistogramEngine::ConstructHistogram(
 #ifdef TIMETAG
   auto stage_start = std::chrono::steady_clock::now();
 #endif
-  CUDASUCCESS_OR_FATAL(cudaMemsetAsync(device_histogram(), 0,
-                                       num_total_bins_ * 2 * sizeof(hist_t), stream()));
-#ifdef TIMETAG
-  SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
-  auto stage_end = std::chrono::steady_clock::now();
-  memset_ms = std::chrono::duration<double, std::milli>(stage_end - stage_start).count();
-  stage_start = std::chrono::steady_clock::now();
-#endif
 
   const int num_groups = static_cast<int>(dense_feature_groups_.size());
   const dim3 block(kHistogramThreads);
@@ -277,7 +269,7 @@ bool RDNA2HistogramEngine::ConstructHistogram(
   }
 #ifdef TIMETAG
   SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
-  stage_end = std::chrono::steady_clock::now();
+  auto stage_end = std::chrono::steady_clock::now();
   kernel_ms = std::chrono::duration<double, std::milli>(stage_end - stage_start).count();
   stage_start = std::chrono::steady_clock::now();
 #endif
