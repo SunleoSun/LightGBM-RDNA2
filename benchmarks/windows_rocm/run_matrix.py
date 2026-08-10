@@ -7,7 +7,14 @@ from pathlib import Path
 import subprocess
 import sys
 
-from run_benchmarks import PROFILE_CONFIGS, SMOKE_PROFILES, STRESS_PROFILES
+from run_benchmarks import (
+    OPTUNA_COMPAT_PROFILES,
+    OPTUNA_LONG_ITERATIONS,
+    OPTUNA_PROFILES,
+    PROFILE_CONFIGS,
+    SMOKE_PROFILES,
+    STRESS_PROFILES,
+)
 
 HERE = Path(__file__).resolve().parent
 TEMP_ROOT = Path(os.environ.get("LIGHTGBM_RDNA2_TEMP", r"C:\Temp\LightGBM-RDNA2\benches"))
@@ -39,7 +46,11 @@ def run_profile(profile: str, iterations: int, train_rows: int, valid_rows: int,
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--suite", choices=["smoke", "production", "stress"], default="smoke")
+    p.add_argument(
+        "--suite",
+        choices=["smoke", "production", "stress", "optuna", "optuna_long", "optuna_compat"],
+        default="smoke",
+    )
     p.add_argument("--train-rows", type=int, default=40000)
     p.add_argument("--valid-rows", type=int)
     p.add_argument("--features", type=int, default=3000)
@@ -54,25 +65,51 @@ def main() -> int:
         profiles = STRESS_PROFILES
         default_iterations = 20
         modes = "all"
+    elif args.suite == "optuna":
+        profiles = OPTUNA_PROFILES
+        default_iterations = 20
+        modes = "v470"
+    elif args.suite == "optuna_long":
+        profiles = list(OPTUNA_LONG_ITERATIONS)
+        default_iterations = None
+        modes = "v470"
+    elif args.suite == "optuna_compat":
+        profiles = OPTUNA_COMPAT_PROFILES
+        default_iterations = 20
+        modes = "all"
     else:
         profiles = SMOKE_PROFILES
         default_iterations = 6
         modes = "v470"
 
     iterations = args.iterations if args.iterations is not None else default_iterations
-    valid_rows = args.valid_rows if args.valid_rows is not None else (5000 if args.suite == "smoke" else 50000)
+    valid_rows = (
+        args.valid_rows
+        if args.valid_rows is not None
+        else (5000 if args.suite in {"smoke", "optuna", "optuna_compat"} else 50000)
+    )
     unknown = [profile for profile in profiles if profile not in PROFILE_CONFIGS]
     if unknown:
         raise RuntimeError(f"unknown benchmark profiles: {unknown}")
 
     results = []
     for profile in profiles:
-        print(f"\n=== {args.suite.upper()} PROFILE {profile} ({iterations} trees) ===", flush=True)
-        results.append(run_profile(profile, iterations, args.train_rows, valid_rows, args.features, modes))
+        if args.iterations is not None:
+            profile_iterations = args.iterations
+        elif args.suite == "optuna_long":
+            profile_iterations = OPTUNA_LONG_ITERATIONS[profile]
+        else:
+            profile_iterations = iterations
+        print(f"\n=== {args.suite.upper()} PROFILE {profile} ({profile_iterations} trees) ===", flush=True)
+        results.append(run_profile(profile, profile_iterations, args.train_rows, valid_rows, args.features, modes))
 
     matrix = {
         "suite": args.suite,
-        "iterations": iterations,
+        "iterations": (
+            {profile: OPTUNA_LONG_ITERATIONS[profile] for profile in profiles}
+            if args.suite == "optuna_long" and args.iterations is None
+            else iterations
+        ),
         "valid_rows": valid_rows,
         "modes": modes,
         "profiles": profiles,
@@ -85,6 +122,7 @@ def main() -> int:
         "results": [
             {
                 "profile": item["profile"],
+                "iterations": item["iterations"],
                 "exit_code": item["exit_code"],
                 "correctness": (
                     item["summary"]["comparison"]["all_checks_passed"]
@@ -96,6 +134,12 @@ def main() -> int:
                 ) if item["summary"] is not None else None,
                 "rdna2_comparison": next(
                     (r for r in item["summary"]["comparison"]["comparisons"] if r["name"] == "v470_rdna2"), None
+                ) if item["summary"] is not None else None,
+                "opencl": next(
+                    (r for r in item["summary"]["results"] if r["name"] == "old_opencl_gpu"), None
+                ) if item["summary"] is not None else None,
+                "opencl_comparison": next(
+                    (r for r in item["summary"]["comparison"]["comparisons"] if r["name"] == "old_opencl_gpu"), None
                 ) if item["summary"] is not None else None,
             }
             for item in results
@@ -110,12 +154,19 @@ def main() -> int:
         rdna2 = item["rdna2"] or {}
         cmp = item["rdna2_comparison"] or {}
         metric = rdna2.get("auc") if rdna2.get("auc") is not None else rdna2.get("rmse")
+        opencl_cmp = item.get("opencl_comparison") or {}
+        opencl_suffix = (
+            f" opencl_diff={opencl_cmp.get('prediction_max_abs_diff', float('nan')):.3g}"
+            f" opencl_struct={opencl_cmp.get('tree_structure_match')}"
+            if opencl_cmp else ""
+        )
         print(
             f"{item['profile']:<20} correctness={str(item['correctness']):<5} "
             f"iter_ms={rdna2.get('iteration_ms', float('nan')):8.3f} "
             f"metric={metric if metric is not None else float('nan'):.8f} "
             f"pred_diff={cmp.get('prediction_max_abs_diff', float('nan')):.3g} "
             f"struct={cmp.get('tree_structure_match')}"
+            f"{opencl_suffix}"
         )
     print(f"Matrix artifacts: {output}")
     print(f"Correctness: {'PASS' if matrix['all_checks_passed'] else 'FAIL'}")

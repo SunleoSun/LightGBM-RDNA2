@@ -8,7 +8,7 @@ param(
     [int]$Iterations = 100,
     [ValidateSet('h64', 'h128', 'all')]
     [string]$Profile = 'all',
-    [ValidateSet('production', 'smoke', 'stress', 'single')]
+    [ValidateSet('production', 'smoke', 'stress', 'optuna', 'optuna_long', 'optuna_compat', 'single')]
     [string]$Suite = 'production',
     [int]$MatrixIterations = 0,
     [double]$PredictionAtol = 1e-6,
@@ -82,7 +82,7 @@ if ($Suite -eq 'single') {
     exit 0
 }
 
-$matrixValidRows = if ($Suite -eq 'smoke') { $SmokeValidRows } else { $ValidRows }
+$matrixValidRows = if ($Suite -in @('smoke', 'optuna', 'optuna_compat')) { $SmokeValidRows } else { $ValidRows }
 $matrixArgs = @((Join-Path $PSScriptRoot 'run_matrix.py'), '--suite', $Suite, '--train-rows', $TrainRows, '--valid-rows', $matrixValidRows, '--features', $Features)
 if ($MatrixIterations -gt 0) { $matrixArgs += @('--iterations', $MatrixIterations) }
 & $Python @matrixArgs

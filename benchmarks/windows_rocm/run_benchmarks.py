@@ -85,10 +85,87 @@ PROFILE_CONFIGS = {
         **H128_BASE, "description": "H128 L2 regression correctness probe", "objective": "regression_l2",
         "metric": "l2", "scale_pos_weight": 1.0, "feature_fraction": 1.0, "bagging_fraction": 1.0,
     },
+    # Representative points from the production Optuna envelope. These are not a Cartesian product:
+    # together they exercise every tree-depth tier, both Stage-2 bin counts, regularization extremes,
+    # learning-rate extremes, bagging regimes, and the upper class-weight bound.
+    "optuna_d2_micro_fast_h64": {
+        **H64_BASE, "description": "Optuna depth-2 micro/very-light, max_bin=64, ultra-fast boost",
+        "max_depth": 2, "num_leaves": 4, "max_bin": 64, "min_data_in_leaf": 30,
+        "feature_fraction": 1.0, "bagging_fraction": 0.85, "learning_rate": 0.085,
+    },
+    "optuna_d2_micro_ultraslow_h64": {
+        **H64_BASE, "description": "Optuna depth-2 micro/sample-heavy, max_bin=64, ultra-slow boost",
+        "max_depth": 2, "num_leaves": 4, "max_bin": 64, "min_data_in_leaf": 100,
+        "feature_fraction": 1.0, "bagging_fraction": 1.0, "learning_rate": 0.02,
+    },
+    "optuna_d3_ultra_h64": {
+        **H64_BASE, "description": "Optuna depth-3 ultra-tight H64 extreme-no-reg",
+        "max_depth": 3, "num_leaves": 8, "max_bin": 64, "min_data_in_leaf": 200,
+        "feature_fraction": 1.0, "bagging_fraction": 1.0, "learning_rate": 0.075,
+    },
+    "optuna_d3_ultra_h128": {
+        **H128_BASE, "description": "Optuna depth-3 ultra-tight H128 light regularization",
+        "max_depth": 3, "num_leaves": 8, "min_data_in_leaf": 50,
+        "feature_fraction": 1.0, "bagging_fraction": 0.9, "learning_rate": 0.06,
+    },
+    "optuna_d4_verytight_strong": {
+        **H128_BASE, "description": "Optuna depth-4 very-tight strong regularization",
+        "max_depth": 4, "num_leaves": 16, "min_data_in_leaf": 100, "learning_rate": 0.05,
+        "lambda_l1": 1.0, "lambda_l2": 1.0, "min_gain_to_split": 0.005,
+        "path_smooth": 1.0, "bagging_fraction": 1.0,
+    },
+    "optuna_d5_shallow_ultraextreme": {
+        **H128_BASE, "description": "Optuna depth-5 shallow-tight ultra-extreme regularization",
+        "max_depth": 5, "num_leaves": 32, "min_data_in_leaf": 200, "learning_rate": 0.04,
+        "lambda_l1": 1.3, "lambda_l2": 2.0, "min_gain_to_split": 0.01,
+        "path_smooth": 1.5, "bagging_fraction": 1.0,
+    },
+    "optuna_d6_balanced_slow": {
+        **H128_BASE, "description": "Optuna depth-6 balanced-small very-light, slow boost",
+        "max_depth": 6, "num_leaves": 40, "min_data_in_leaf": 30, "learning_rate": 0.03,
+        "lambda_l1": 0.0, "lambda_l2": 0.0, "path_smooth": 0.0, "bagging_fraction": 0.85,
+    },
+    "optuna_d8_deep_light": {
+        **H128_BASE, "description": "Optuna depth-8 deep-controlled light regularization",
+        "max_depth": 8, "num_leaves": 120, "min_data_in_leaf": 50, "learning_rate": 0.025,
+        "lambda_l1": 0.1, "lambda_l2": 0.1, "bagging_fraction": 0.9,
+    },
+    "optuna_d8_deep_scale64": {
+        **H128_BASE, "description": "Optuna depth-8 deep-controlled upper class weight, ultra-slow boost",
+        "max_depth": 8, "num_leaves": 120, "min_data_in_leaf": 30, "learning_rate": 0.02,
+        "lambda_l1": 0.0, "lambda_l2": 0.0, "bagging_fraction": 0.85, "scale_pos_weight": 64.0,
+    },
 }
 
 SMOKE_PROFILES = ["h64", "h128", "h64_scale16", "h128_regression"]
-STRESS_PROFILES = list(PROFILE_CONFIGS)
+OPTUNA_PROFILES = [
+    "h64",
+    "optuna_d2_micro_fast_h64",
+    "optuna_d2_micro_ultraslow_h64",
+    "optuna_d3_ultra_h64",
+    "optuna_d3_ultra_h128",
+    "optuna_d4_verytight_strong",
+    "optuna_d5_shallow_ultraextreme",
+    "optuna_d6_balanced_slow",
+    "optuna_d8_deep_light",
+    "optuna_d8_deep_scale64",
+]
+OPTUNA_LONG_ITERATIONS = {
+    "optuna_d2_micro_fast_h64": 80,
+    "h64": 120,
+    "optuna_d3_ultra_h128": 200,
+    "optuna_d4_verytight_strong": 300,
+    "optuna_d5_shallow_ultraextreme": 450,
+    "optuna_d6_balanced_slow": 650,
+    "optuna_d8_deep_light": 850,
+    "optuna_d8_deep_scale64": 1050,
+}
+OPTUNA_COMPAT_PROFILES = [
+    "optuna_d2_micro_fast_h64",
+    "optuna_d4_verytight_strong",
+    "optuna_d8_deep_light",
+]
+STRESS_PROFILES = [name for name in PROFILE_CONFIGS if not name.startswith("optuna_")]
 
 
 def profile_param_string(profile: dict) -> str:
@@ -356,11 +433,17 @@ def compare(
     ref_hard = (ref_pred >= threshold).astype(np.int8) if binary else None
     ref_confusion = confusion_matrix(y_valid, ref_hard) if binary else None
     if binary:
+        ref_positive = int(ref_hard.sum())
+        ref_negative = int(len(ref_hard) - ref_positive)
+        ref_smallest_class_fraction = min(ref_positive, ref_negative) / len(ref_hard)
+        required_class_fraction = min(min_class_fraction, ref_smallest_class_fraction)
         ref_confident_low = int(np.sum(ref_pred < 0.1))
         ref_confident_high = int(np.sum(ref_pred > 0.9))
         ref_confident_fraction = min(ref_confident_low, ref_confident_high) / len(ref_pred)
         required_confident_fraction = min(min_confident_fraction, ref_confident_fraction)
     else:
+        ref_smallest_class_fraction = None
+        required_class_fraction = None
         ref_confident_fraction = None
         required_confident_fraction = None
 
@@ -424,7 +507,7 @@ def compare(
                 not finite or not probabilities or not nonconstant or trees != iterations
                 or not allclose or structural != ref_struct or not hard_match or not confusion_match
                 or auc_diff > auc_tol or correlation < correlation_min
-                or smallest_class_fraction < min_class_fraction
+                or smallest_class_fraction < required_class_fraction
                 or confident_fraction < required_confident_fraction
             )
         else:
@@ -447,6 +530,8 @@ def compare(
         "auc_tol": auc_tol, "regression_metric_tol": regression_metric_tol,
         "correlation_min": correlation_min, "classification_threshold": threshold,
         "min_class_fraction": min_class_fraction, "min_confident_fraction": min_confident_fraction,
+        "reference_smallest_class_fraction": ref_smallest_class_fraction,
+        "required_class_fraction": required_class_fraction,
         "reference_confident_fraction": ref_confident_fraction,
         "required_confident_fraction": required_confident_fraction,
         "reference_confusion_matrix": ref_confusion, "reference_auc": ref_auc, "reference_rmse": ref_rmse,
