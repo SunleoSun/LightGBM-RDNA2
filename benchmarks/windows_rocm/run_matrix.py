@@ -8,6 +8,7 @@ import subprocess
 import sys
 
 from run_benchmarks import (
+    FEATURE_FRACTION_PROFILES,
     OPTUNA_COMPAT_PROFILES,
     OPTUNA_LONG_ITERATIONS,
     OPTUNA_PROFILES,
@@ -48,7 +49,7 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument(
         "--suite",
-        choices=["smoke", "production", "stress", "optuna", "optuna_long", "optuna_compat"],
+        choices=["smoke", "production", "stress", "feature_fraction", "optuna", "optuna_long", "optuna_compat"],
         default="smoke",
     )
     p.add_argument("--train-rows", type=int, default=40000)
@@ -65,6 +66,10 @@ def main() -> int:
         profiles = STRESS_PROFILES
         default_iterations = 20
         modes = "all"
+    elif args.suite == "feature_fraction":
+        profiles = FEATURE_FRACTION_PROFILES
+        default_iterations = 20
+        modes = "v470"
     elif args.suite == "optuna":
         profiles = OPTUNA_PROFILES
         default_iterations = 20
@@ -86,7 +91,7 @@ def main() -> int:
     valid_rows = (
         args.valid_rows
         if args.valid_rows is not None
-        else (5000 if args.suite in {"smoke", "optuna", "optuna_compat"} else 50000)
+        else (5000 if args.suite in {"smoke", "feature_fraction", "optuna", "optuna_compat"} else 50000)
     )
     unknown = [profile for profile in profiles if profile not in PROFILE_CONFIGS]
     if unknown:

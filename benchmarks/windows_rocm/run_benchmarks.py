@@ -63,6 +63,8 @@ PROFILE_CONFIGS = {
     "h128": dict(H128_BASE),
     "h64_subsample1": {**H64_BASE, "description": "H64 without bagging", "bagging_fraction": 1.0},
     "h64_feature50": {**H64_BASE, "description": "H64 with 50% feature sampling", "feature_fraction": 0.5},
+    "h64_feature75": {**H64_BASE, "description": "H64 with 75% feature sampling", "feature_fraction": 0.75},
+    "h64_feature100": {**H64_BASE, "description": "H64 with all features enabled", "feature_fraction": 1.0},
     "h64_scale16": {**H64_BASE, "description": "H64 with strong positive-class weighting", "scale_pos_weight": 16.0},
     "h64_strong_reg": {
         **H64_BASE, "description": "H64 strong regularization", "min_data_in_leaf": 100,
@@ -75,6 +77,8 @@ PROFILE_CONFIGS = {
     },
     "h128_subsample1": {**H128_BASE, "description": "H128 without bagging", "bagging_fraction": 1.0},
     "h128_feature50": {**H128_BASE, "description": "H128 with 50% feature sampling", "feature_fraction": 0.5},
+    "h128_feature75": {**H128_BASE, "description": "H128 with 75% feature sampling", "feature_fraction": 0.75},
+    "h128_feature90": {**H128_BASE, "description": "H128 with 90% feature sampling", "feature_fraction": 0.9},
     "h128_scale16": {**H128_BASE, "description": "H128 with strong positive-class weighting", "scale_pos_weight": 16.0},
     "h128_strong_reg": {
         **H128_BASE, "description": "H128 strong regularization", "min_data_in_leaf": 100,
@@ -138,6 +142,16 @@ PROFILE_CONFIGS = {
 }
 
 SMOKE_PROFILES = ["h64", "h128", "h64_scale16", "h128_regression"]
+FEATURE_FRACTION_PROFILES = [
+    "h64_feature50",
+    "h64_feature75",
+    "h64",
+    "h64_feature100",
+    "h128_feature50",
+    "h128_feature75",
+    "h128_feature90",
+    "h128",
+]
 OPTUNA_PROFILES = [
     "h64",
     "optuna_d2_micro_fast_h64",
