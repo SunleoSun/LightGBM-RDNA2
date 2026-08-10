@@ -316,7 +316,7 @@ bool RDNA2HistogramEngine::ConstructHistogram(
   const int num_groups = static_cast<int>(dense_feature_groups_.size());
   const dim3 block(kHistogramThreads);
   constexpr int kH64SuperTileTuples = 2;
-  constexpr data_size_t kH64SuperTileMinRows = 16384;
+  constexpr data_size_t kH64SuperTileMinRows = 12288;
   const bool use_indices = device_indices != nullptr;
   if (h64_eligible_ && num_data >= kH64SuperTileMinRows) {
     const int num_tiles = (static_cast<int>(num_feature4_) + kH64SuperTileTuples - 1) / kH64SuperTileTuples;
