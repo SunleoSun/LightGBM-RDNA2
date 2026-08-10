@@ -4,15 +4,15 @@ description: Source-grounded optimization order for RX 6800 XT gfx1030, from saf
 
 # RX 6800 XT optimization roadmap
 
-This ordering follows the actual production path and keeps each performance stage behind a correctness gate. The dominant owner is `CUDAHistogramConstructor`; `CUDARowData` owns dense row packing/feature partitions, and `CUDABestSplitFinder` remains a later consumer of the durable histograms.
+This ordering now follows a revised production boundary. The current `CUDASingleGPUTreeLearner` remains a diagnostic source and keeps the accepted fixes, but it is no longer the preferred semantic foundation for RX 6800 XT work. The preferred owner is a fork-specific `rdna2` tree learner that preserves `GPUTreeLearner` / `SerialTreeLearner` host semantics and delegates histogram construction to an RDNA2 HIP engine.
 
-## Phase 0 - contain broken specialization and establish the diagnostic baseline
+## Phase 0 - establish the RDNA2 backend boundary
 
-The old gfx1030 feature4 kernel is valid only when the selected partition contains at most four columns. Enforce that at dispatch and assert it at launch. This preserves the proven H256 fast path while H64/H128 bypass it. Do not force H64/H128 partitions down to four columns merely to make them enter feature4; that reuses the wrong architecture instead of fixing the production workload.
+Add `device_type=rdna2` without changing upstream `cpu`, `gpu`, or `cuda` contracts. Route RDNA2 training through Serial/OpenCL-style objective, score, split-selection, leaf bookkeeping, and subtraction semantics. Reuse the same Dataset/BinMapper representation and offload histogram construction only. The benchmark already proves that CPU, legacy OpenCL, and ROCm consume the same CPU-produced `.bin`; dataset rebucketing is not the current divergence source.
 
-The generic HIP fallback is a diagnostic baseline, not a strict-correctness reference. After bypassing feature4 it removes the catastrophic H64/H128 corruption, but strict CPU equality still fails on late splits. H128 regression is especially informative: the first five trees match CPU and the sixth differs only at its final split. Use this baseline to distinguish gross mapping/layout defects from smaller numerical or split-selection differences.
+Keep the existing gfx1030 feature4 guard in the CUDA/HIP diagnostic path: the old feature4 kernel is valid only when the selected partition contains at most four columns. H64/H128 bypass it while H256 can retain the proven fast path. The generic HIP fallback is still useful as a diagnostic baseline but should not define RDNA2 correctness semantics.
 
-The August 9 synchronization reductions and gfx1030 grid/data-per-thread tuning have been rollback-tested and do not change this residual mismatch, so they remain enabled. A separate CUDA binary-objective class-weight indexing bug has been fixed and should stay independent of histogram work.
+The August 9 synchronization reductions and gfx1030 grid/data-per-thread tuning have been rollback-tested and do not change the residual mismatch. CPU-objective-only routing, single-grid-y construction, and a CUDA best-split count-prefix experiment also did not change the failing structure and were reverted.
 
 ## Phase 1 - H64 OpenCL-style reference
 
@@ -63,4 +63,4 @@ Possible later work is feature-tile histogram -> prefix/gain evaluation while da
 5. Retain an H256 regression check while the historical feature4 path remains reachable.
 6. Compare kernel timers, total training time, tree structure, predictions, AUC/RMSE, and tree count. Performance without correctness is discarded.
 
-The immediate next engineering task is Phase 1: build a dedicated H64 OpenCL-style reference path on top of the now-contained feature4 dispatch, using the generic HIP results only as a diagnostic control.
+The immediate next engineering task is Phase 0: implement the `rdna2` routing and learner boundary, then prove a minimal RDNA2 histogram path against the strict smoke suite before porting the H64/H128 OpenCL-style kernels onto it.
