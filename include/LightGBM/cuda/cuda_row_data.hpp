@@ -78,6 +78,8 @@ class CUDARowData {
 
   int shared_hist_size() const { return shared_hist_size_; }
 
+  bool use_gfx1030_feature4() const { return use_gfx1030_feature4_; }
+
  private:
   void DivideCUDAFeatureGroups(const Dataset* train_data, TrainingShareStates* share_state);
 
@@ -140,6 +142,8 @@ class CUDARowData {
   int shared_hist_size_;
   /*! \brief whether to use double precision in histograms per block */
   bool gpu_use_dp_;
+  /*! \brief use the dense uint8 feature4 histogram path tuned for gfx1030 */
+  bool use_gfx1030_feature4_ = false;
 
   // CUDA memory
 

@@ -43,14 +43,12 @@ void CUDALeafSplits::InitValues(
   double* root_sum_gradients, double* root_sum_hessians) {
   cuda_gradients_ = cuda_gradients;
   cuda_hessians_ = cuda_hessians;
-  cuda_sum_of_gradients_buffer_.SetValue(0);
-  cuda_sum_of_hessians_buffer_.SetValue(0);
+  CUDASUCCESS_OR_FATAL(cudaMemset(cuda_sum_of_gradients_buffer_.RawData(), 0, cuda_sum_of_gradients_buffer_.Size() * sizeof(double)));
+  CUDASUCCESS_OR_FATAL(cudaMemset(cuda_sum_of_hessians_buffer_.RawData(), 0, cuda_sum_of_hessians_buffer_.Size() * sizeof(double)));
   LaunchInitValuesKernel(lambda_l1, lambda_l2, cuda_bagging_data_indices, cuda_data_indices_in_leaf, num_used_indices, cuda_hist_in_leaf);
   CopyFromCUDADeviceToHost<double>(root_sum_gradients, cuda_sum_of_gradients_buffer_.RawData(), 1, __FILE__, __LINE__);
   CopyFromCUDADeviceToHost<double>(root_sum_hessians, cuda_sum_of_hessians_buffer_.RawData(), 1, __FILE__, __LINE__);
-  SynchronizeCUDADevice(__FILE__, __LINE__);
 }
-
 void CUDALeafSplits::InitValues(
   const double lambda_l1, const double lambda_l2,
   const int16_t* cuda_gradients_and_hessians,

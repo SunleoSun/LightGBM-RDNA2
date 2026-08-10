@@ -70,6 +70,87 @@ __global__ void CUDAConstructHistogramDenseKernel(
   }
 }
 
+#define GFX1030_FEATURE4_BLOCK_SIZE (256)
+#define GFX1030_FEATURE4_NUM_FEATURES (4)
+#define GFX1030_FEATURE4_NUM_BINS (256)
+#define GFX1030_FEATURE4_SHARED_SIZE (GFX1030_FEATURE4_NUM_FEATURES * GFX1030_FEATURE4_NUM_BINS * 2)
+
+__global__ void CUDAConstructHistogramDenseFeature4Gfx1030Kernel(
+  const CUDALeafSplitsStruct* smaller_leaf_splits,
+  const score_t* cuda_gradients,
+  const score_t* cuda_hessians,
+  const uint8_t* data,
+  const uint32_t* column_hist_offsets,
+  const uint32_t* partition_hist_offsets,
+  const int* feature_partition_column_index_offsets,
+  const data_size_t num_data) {
+  __shared__ float shared_hist[GFX1030_FEATURE4_SHARED_SIZE];
+  const unsigned int tid = threadIdx.x;
+  for (unsigned int i = tid; i < GFX1030_FEATURE4_SHARED_SIZE; i += blockDim.x) {
+    shared_hist[i] = 0.0f;
+  }
+  __syncthreads();
+
+  const int partition_column_start = feature_partition_column_index_offsets[blockIdx.x];
+  const int partition_column_end = feature_partition_column_index_offsets[blockIdx.x + 1];
+  const int num_columns = partition_column_end - partition_column_start;
+  const uint8_t* partition_data = data + static_cast<size_t>(partition_column_start) * num_data;
+  const data_size_t num_data_in_leaf = smaller_leaf_splits->num_data_in_leaf;
+  const data_size_t* data_indices = smaller_leaf_splits->data_indices_in_leaf;
+  const data_size_t logical_threads = static_cast<data_size_t>(gridDim.y) * blockDim.x;
+  const data_size_t rows_per_thread = (num_data_in_leaf + logical_threads - 1) / logical_threads;
+  const data_size_t block_start = static_cast<data_size_t>(blockIdx.y) * blockDim.x * rows_per_thread;
+  const data_size_t block_num_data = max(
+    static_cast<data_size_t>(0),
+    min(num_data_in_leaf - block_start, rows_per_thread * static_cast<data_size_t>(blockDim.x)));
+
+  for (data_size_t inner = static_cast<data_size_t>(tid); inner < block_num_data; inner += blockDim.x) {
+    const data_size_t data_index = data_indices[block_start + inner];
+    const float grad = cuda_gradients[data_index];
+    const float hess = cuda_hessians[data_index];
+    const uint8_t* row = partition_data + static_cast<size_t>(data_index) * num_columns;
+    uint32_t packed_bins = 0;
+    if (num_columns == GFX1030_FEATURE4_NUM_FEATURES) {
+      packed_bins = *reinterpret_cast<const uint32_t*>(row);
+    }
+    const int lane_feature_offset = static_cast<int>(tid & 3u);
+#pragma unroll
+    for (int slot = 0; slot < GFX1030_FEATURE4_NUM_FEATURES; ++slot) {
+      const int feature = (slot + lane_feature_offset) & 3;
+      if (feature < num_columns) {
+        const uint32_t bin = num_columns == GFX1030_FEATURE4_NUM_FEATURES
+          ? ((packed_bins >> (feature * 8)) & 0xffu)
+          : static_cast<uint32_t>(row[feature]);
+        float* const hist = shared_hist + bin * 8 + feature;
+        atomicAdd_block(hist, grad);
+        atomicAdd_block(hist + 4, hess);
+      }
+    }
+  }
+  __syncthreads();
+
+  const uint32_t partition_hist_start = partition_hist_offsets[blockIdx.x];
+  const uint32_t partition_hist_end = partition_hist_offsets[blockIdx.x + 1];
+  hist_t* const output_hist = smaller_leaf_splits->hist_in_leaf + (partition_hist_start << 1);
+#pragma unroll
+  for (int feature = 0; feature < GFX1030_FEATURE4_NUM_FEATURES; ++feature) {
+    if (feature < num_columns) {
+      const int column_index = partition_column_start + feature;
+      const uint32_t hist_start = column_hist_offsets[column_index];
+      const uint32_t hist_end = feature + 1 < num_columns
+        ? column_hist_offsets[column_index + 1]
+        : partition_hist_end - partition_hist_start;
+      const uint32_t num_bins = hist_end - hist_start;
+      if (tid < num_bins) {
+        const unsigned int local_pos = tid * 8 + feature;
+        const unsigned int output_pos = (hist_start + tid) << 1;
+        atomicAdd_system(output_hist + output_pos, shared_hist[local_pos]);
+        atomicAdd_system(output_hist + output_pos + 1, shared_hist[local_pos + 4]);
+      }
+    }
+  }
+}
+
 template <typename BIN_TYPE, typename DATA_PTR_TYPE, typename HIST_TYPE, size_t SHARED_HIST_SIZE>
 __global__ void CUDAConstructHistogramSparseKernel(
   const CUDALeafSplitsStruct* smaller_leaf_splits,
@@ -517,13 +598,41 @@ void CUDAHistogramConstructor::LaunchConstructHistogramKernel(
   const CUDALeafSplitsStruct* cuda_smaller_leaf_splits,
   const data_size_t num_data_in_smaller_leaf,
   const uint8_t num_bits_in_histogram_bins) {
-  if (cuda_row_data_->shared_hist_size() == DP_SHARED_HIST_SIZE && gpu_use_dp_) {
+  if (cuda_row_data_->use_gfx1030_feature4() &&
+      cuda_row_data_->bit_type() == 8 &&
+      !cuda_row_data_->is_sparse() &&
+      cuda_row_data_->NumLargeBinPartition() == 0 &&
+      !gpu_use_dp_ &&
+      !use_quantized_grad_) {
+    LaunchConstructHistogramGfx1030Feature4Kernel(cuda_smaller_leaf_splits, num_data_in_smaller_leaf);
+  } else if (cuda_row_data_->shared_hist_size() == DP_SHARED_HIST_SIZE && gpu_use_dp_) {
     LaunchConstructHistogramKernelInner<double, DP_SHARED_HIST_SIZE>(cuda_smaller_leaf_splits, num_data_in_smaller_leaf, num_bits_in_histogram_bins);
   } else if (cuda_row_data_->shared_hist_size() == SP_SHARED_HIST_SIZE && !gpu_use_dp_) {
     LaunchConstructHistogramKernelInner<float, SP_SHARED_HIST_SIZE>(cuda_smaller_leaf_splits, num_data_in_smaller_leaf, num_bits_in_histogram_bins);
+  } else if (cuda_row_data_->shared_hist_size() == GFX1030_FEATURE4_SHARED_SIZE && !gpu_use_dp_) {
+    LaunchConstructHistogramKernelInner<float, GFX1030_FEATURE4_SHARED_SIZE>(cuda_smaller_leaf_splits, num_data_in_smaller_leaf, num_bits_in_histogram_bins);
   } else {
     Log::Fatal("Unknown shared histogram size %d", cuda_row_data_->shared_hist_size());
   }
+}
+
+void CUDAHistogramConstructor::LaunchConstructHistogramGfx1030Feature4Kernel(
+  const CUDALeafSplitsStruct* cuda_smaller_leaf_splits,
+  const data_size_t num_data_in_smaller_leaf) {
+  const int grid_dim_x = cuda_row_data_->num_feature_partitions();
+  const int calculated_grid_dim_y =
+    ((num_data_in_smaller_leaf + num_data_per_thread_ - 1) / num_data_per_thread_ + GFX1030_FEATURE4_BLOCK_SIZE - 1) / GFX1030_FEATURE4_BLOCK_SIZE;
+  const int grid_dim_y = std::max(min_grid_dim_y_, calculated_grid_dim_y);
+  const dim3 grid_dim(grid_dim_x, grid_dim_y);
+  const dim3 block_dim(GFX1030_FEATURE4_BLOCK_SIZE);
+  CUDAConstructHistogramDenseFeature4Gfx1030Kernel<<<grid_dim, block_dim, 0, cuda_stream_>>>(
+    cuda_smaller_leaf_splits,
+    cuda_gradients_, cuda_hessians_,
+    cuda_row_data_->GetBin<uint8_t>(),
+    cuda_row_data_->cuda_column_hist_offsets(),
+    cuda_row_data_->cuda_partition_hist_offsets(),
+    cuda_row_data_->cuda_feature_partition_column_index_offsets(),
+    num_data_);
 }
 
 template <typename HIST_TYPE, size_t SHARED_HIST_SIZE>

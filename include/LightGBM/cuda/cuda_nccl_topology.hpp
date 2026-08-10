@@ -9,12 +9,6 @@
 
 #ifdef USE_CUDA
 
-#ifdef USE_ROCM
-#include <rccl/rccl.h>
-#else
-#include <nccl.h>
-#endif
-
 #include <LightGBM/cuda/cuda_utils.hu>
 #include <LightGBM/network.h>
 #include <LightGBM/utils/common.h>

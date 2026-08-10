@@ -10,6 +10,7 @@
 #include "cuda_histogram_constructor.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <vector>
 
 namespace LightGBM {
@@ -78,7 +79,7 @@ void CUDAHistogramConstructor::InitFeatureMetaInfo(const Dataset* train_data, co
 void CUDAHistogramConstructor::BeforeTrain(const score_t* gradients, const score_t* hessians) {
   cuda_gradients_ = gradients;
   cuda_hessians_ = hessians;
-  cuda_hist_.SetValue(0);
+  CUDASUCCESS_OR_FATAL(cudaMemsetAsync(cuda_hist_.RawData(), 0, cuda_hist_.Size() * sizeof(hist_t), cuda_stream_));
 }
 
 void CUDAHistogramConstructor::Init(const Dataset* train_data, TrainingShareStates* share_state) {
@@ -91,6 +92,20 @@ void CUDAHistogramConstructor::Init(const Dataset* train_data, TrainingShareStat
 
   cuda_row_data_.reset(new CUDARowData(train_data, share_state, gpu_device_id_, gpu_use_dp_));
   cuda_row_data_->Init(train_data, share_state);
+
+#ifdef USE_ROCM
+  const int device_index = GetCUDADevice(__FILE__, __LINE__);
+  cudaDeviceProp device_prop;
+  CUDASUCCESS_OR_FATAL(cudaGetDeviceProperties(&device_prop, device_index));
+  if (std::strncmp(device_prop.gcnArchName, "gfx1030", 7) == 0) {
+    min_grid_dim_y_ = 2;
+    num_data_per_thread_ = 1200;
+  }
+#ifdef TIMETAG
+  Log::Info("CUDA histogram geometry: arch=%s min_grid_dim_y=%d data_per_thread=%d",
+            device_prop.gcnArchName, min_grid_dim_y_, num_data_per_thread_);
+#endif
+#endif
 
   CUDASUCCESS_OR_FATAL(cudaStreamCreate(&cuda_stream_));
 
@@ -130,8 +145,12 @@ if ((global_num_data_in_smaller_leaf <= min_data_in_leaf_ || sum_hessians_in_sma
     (global_num_data_in_larger_leaf <= min_data_in_leaf_ || sum_hessians_in_larger_leaf <= min_sum_hessian_in_leaf_)) {
     return;
   }
+  global_timer.Start("CUDAHistogramConstructor::LaunchConstructHistogramKernel");
   LaunchConstructHistogramKernel(cuda_smaller_leaf_splits, num_data_in_smaller_leaf, num_bits_in_histogram_bins);
+  global_timer.Stop("CUDAHistogramConstructor::LaunchConstructHistogramKernel");
+  global_timer.Start("CUDAHistogramConstructor::ConstructHistogramSynchronize");
   SynchronizeCUDADevice(__FILE__, __LINE__);
+  global_timer.Stop("CUDAHistogramConstructor::ConstructHistogramSynchronize");
 }
 
 void CUDAHistogramConstructor::SubtractHistogramForLeaf(
@@ -156,8 +175,9 @@ void CUDAHistogramConstructor::CalcConstructHistogramKernelDim(
   *block_dim_x = cuda_row_data_->max_num_column_per_partition();
   *block_dim_y = NUM_THREADS_PER_BLOCK / cuda_row_data_->max_num_column_per_partition();
   *grid_dim_x = cuda_row_data_->num_feature_partitions();
-  *grid_dim_y = std::max(min_grid_dim_y_,
-    ((num_data_in_smaller_leaf + NUM_DATA_PER_THREAD - 1) / NUM_DATA_PER_THREAD + (*block_dim_y) - 1) / (*block_dim_y));
+  const int calculated_grid_dim_y =
+    ((num_data_in_smaller_leaf + num_data_per_thread_ - 1) / num_data_per_thread_ + (*block_dim_y) - 1) / (*block_dim_y);
+  *grid_dim_y = std::max(min_grid_dim_y_, calculated_grid_dim_y);
 }
 
 void CUDAHistogramConstructor::ResetTrainingData(const Dataset* train_data, TrainingShareStates* share_states) {

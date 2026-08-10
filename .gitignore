@@ -3,6 +3,15 @@
 
 # User-specific files
 *.suo
+
+# Local Windows CPU/OpenCL/ROCm benchmark outputs
+benchmarks/windows_rocm/bin/
+benchmarks/windows_rocm/data/
+benchmarks/windows_rocm/artifacts/
+benchmarks/windows_rocm/build-cpu/
+benchmarks/windows_rocm/build-rocm/
+benchmarks/windows_rocm/build-rocm-timetag/
+benchmarks/windows_rocm/build-rocm-unsafe/
 *.user
 *.userosscache
 *.sln.docstates
@@ -431,6 +440,7 @@ lightgbm*.tgz
 lightgbm.Rcheck/
 miktex*.zip
 *.def
+*.exp
 
 # Files created by examples and tests
 *.buffer

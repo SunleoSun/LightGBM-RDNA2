@@ -25,8 +25,13 @@
 #define cudaGetErrorName hipGetErrorName
 #define cudaGetErrorString hipGetErrorString
 #define cudaGetLastError hipGetLastError
+#if defined(_WIN32)
+#define cudaHostAlloc hipHostMalloc
+#define cudaHostAllocPortable hipHostMallocPortable
+#else
 #define cudaHostAlloc hipHostAlloc
-#define cudaHostAllocPortable hipHostAllocPortable
+#define cudaHostAllocPortable hipHostMallocPortable
+#endif
 #define cudaMalloc hipMalloc
 #define cudaMemcpy hipMemcpy
 #define cudaMemcpyAsync hipMemcpyAsync
@@ -35,6 +40,7 @@
 #define cudaMemcpyHostToDevice hipMemcpyHostToDevice
 #define cudaMemoryTypeHost hipMemoryTypeHost
 #define cudaMemset hipMemset
+#define cudaMemsetAsync hipMemsetAsync
 #define cudaPointerAttributes hipPointerAttribute_t
 #define cudaPointerGetAttributes hipPointerGetAttributes
 #define cudaSetDevice hipSetDevice

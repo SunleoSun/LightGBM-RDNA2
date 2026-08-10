@@ -115,6 +115,10 @@ class CUDAHistogramConstructor {
     const data_size_t num_data_in_smaller_leaf,
     const uint8_t num_bits_in_histogram_bins);
 
+  void LaunchConstructHistogramGfx1030Feature4Kernel(
+    const CUDALeafSplitsStruct* cuda_smaller_leaf_splits,
+    const data_size_t num_data_in_smaller_leaf);
+
   void LaunchSubtractHistogramKernel(
     const CUDALeafSplitsStruct* cuda_smaller_leaf_splits,
     const CUDALeafSplitsStruct* cuda_larger_leaf_splits,
@@ -151,8 +155,10 @@ class CUDAHistogramConstructor {
   std::vector<int> need_fix_histogram_features_;
   /*! \brief aligned number of bins of the features whose histograms need to be fixed */
   std::vector<uint32_t> need_fix_histogram_features_num_bin_aligend_;
-  /*! \brief minimum number of blocks allowed in the y dimension */
-  const int min_grid_dim_y_ = 160;
+  /*! \brief device-specific minimum number of blocks allowed in the y dimension */
+  int min_grid_dim_y_ = 160;
+  /*! \brief target number of data points processed by each histogram thread */
+  int num_data_per_thread_ = NUM_DATA_PER_THREAD;
 
 
   // CUDA memory, held by this object

@@ -8,6 +8,7 @@
 
 #include <LightGBM/cuda/cuda_row_data.hpp>
 
+#include <cstring>
 #include <vector>
 
 namespace LightGBM {
@@ -20,11 +21,25 @@ gpu_device_id_(gpu_device_id),
 gpu_use_dp_(gpu_use_dp) {
   num_threads_ = OMP_NUM_THREADS();
   num_data_ = train_data->num_data();
+  if (gpu_device_id >= 0) {
+    SetCUDADevice(gpu_device_id, __FILE__, __LINE__);
+  } else {
+    SetCUDADevice(0, __FILE__, __LINE__);
+  }
   const auto& feature_hist_offsets = train_share_state->feature_hist_offsets();
   if (gpu_use_dp_) {
     shared_hist_size_ = DP_SHARED_HIST_SIZE;
   } else {
     shared_hist_size_ = SP_SHARED_HIST_SIZE;
+#ifdef USE_ROCM
+    const int device_index = GetCUDADevice(__FILE__, __LINE__);
+    cudaDeviceProp device_prop;
+    CUDASUCCESS_OR_FATAL(cudaGetDeviceProperties(&device_prop, device_index));
+    if (std::strncmp(device_prop.gcnArchName, "gfx1030", 7) == 0) {
+      shared_hist_size_ = 2048;
+      use_gfx1030_feature4_ = true;
+    }
+#endif
   }
   if (feature_hist_offsets.empty()) {
     num_total_bin_ = 0;
@@ -33,11 +48,6 @@ gpu_use_dp_(gpu_use_dp) {
   }
   num_feature_group_ = train_data->num_feature_groups();
   num_feature_ = train_data->num_features();
-  if (gpu_device_id >= 0) {
-    SetCUDADevice(gpu_device_id, __FILE__, __LINE__);
-  } else {
-    SetCUDADevice(0, __FILE__, __LINE__);
-  }
 }
 
 CUDARowData::~CUDARowData() {}
@@ -149,6 +159,12 @@ void CUDARowData::Init(const Dataset* train_data, TrainingShareStates* train_sha
     Log::Fatal("Unknown bit type = %d", bit_type_);
   }
   SynchronizeCUDADevice(__FILE__, __LINE__);
+#ifdef TIMETAG
+  Log::Info("CUDA row data profile: sparse=%d bit_type=%u row_ptr_bits=%u partitions=%d large_partitions=%d max_columns_per_partition=%d shared_hist_size=%d",
+            static_cast<int>(is_sparse_), static_cast<unsigned>(bit_type_), static_cast<unsigned>(row_ptr_bit_type_),
+            num_feature_partitions_, static_cast<int>(large_bin_partitions_.size()),
+            max_num_column_per_partition_, shared_hist_size_);
+#endif
 }
 
 void CUDARowData::DivideCUDAFeatureGroups(const Dataset* train_data, TrainingShareStates* share_state) {
