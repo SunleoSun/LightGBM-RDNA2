@@ -58,10 +58,15 @@ class RDNA2HistogramEngine {
     }
 
     num_feature4_ = (dense_feature_groups_.size() + 3) / 4;
-    h64_eligible_ = dense_feature_groups_.size() == static_cast<size_t>(num_feature_groups) &&
-                    !dense_feature_groups_.empty() &&
+    const bool all_dense_single =
+        dense_feature_groups_.size() == static_cast<size_t>(num_feature_groups) &&
+        !dense_feature_groups_.empty();
+    h64_eligible_ = all_dense_single &&
                     std::all_of(dense_feature_num_bins_.begin(), dense_feature_num_bins_.end(),
                                 [](int bins) { return bins <= 64; });
+    h128_eligible_ = all_dense_single &&
+                     std::all_of(dense_feature_num_bins_.begin(), dense_feature_num_bins_.end(),
+                                 [](int bins) { return bins <= 128; });
 
     num_total_bins_ = static_cast<size_t>(train_data_->NumTotalBin());
     std::vector<uint32_t> host_group_bin_offsets(static_cast<size_t>(num_feature_groups) + 1);
@@ -137,14 +142,16 @@ class RDNA2HistogramEngine {
     const double packed_mib = static_cast<double>(host_packed.size() * sizeof(PackedFeature4)) / (1024.0 * 1024.0);
     Log::Info("RDNA2 packed dataset: arch=%s rows=%d dense_groups=%d feature4=%d size=%.2f MiB h64=%s pack=%.3f ms alloc=%.3f ms H2D=%.3f ms",
               device_prop.gcnArchName, static_cast<int>(num_data_), static_cast<int>(dense_feature_groups_.size()),
-              static_cast<int>(num_feature4_), packed_mib, h64_eligible_ ? "yes" : "no",
+              static_cast<int>(num_feature4_), packed_mib,
+              h64_eligible_ ? "yes" : (h128_eligible_ ? "h128" : "no"),
               pack_elapsed.count(), allocation_elapsed.count(), upload_elapsed.count());
   }
   void BeforeTrain(const score_t* gradients, const score_t* hessians);
 
-  bool ConstructH64(const data_size_t* data_indices, data_size_t num_data, hist_t* host_histogram);
+  bool ConstructHistogram(const data_size_t* data_indices, data_size_t num_data, hist_t* host_histogram);
 
   bool h64_eligible() const { return h64_eligible_; }
+  bool h128_eligible() const { return h128_eligible_; }
   data_size_t num_data() const { return num_data_; }
   size_t num_feature4() const { return num_feature4_; }
   size_t num_total_bins() const { return num_total_bins_; }
@@ -163,6 +170,7 @@ class RDNA2HistogramEngine {
   size_t num_feature4_ = 0;
   size_t num_total_bins_ = 0;
   bool h64_eligible_ = false;
+  bool h128_eligible_ = false;
   std::vector<int> dense_feature_groups_;
   std::vector<int> dense_feature_num_bins_;
   CUDAVector<PackedFeature4> packed_features_;
