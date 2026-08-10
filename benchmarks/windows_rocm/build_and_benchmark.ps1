@@ -12,14 +12,17 @@ param(
     [string]$Suite = 'production',
     [int]$MatrixIterations = 0,
     [double]$PredictionAtol = 1e-6,
-    [double]$PredictionRtol = 1e-6
+    [double]$PredictionRtol = 1e-6,
+    [string]$WorkRoot = 'C:\Temp\LightGBM-RDNA2'
 )
 
 $ErrorActionPreference = 'Stop'
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$Bin = Join-Path $PSScriptRoot 'bin'
-$CpuBuild = Join-Path $PSScriptRoot 'build-cpu'
-$RocmBuild = Join-Path $PSScriptRoot 'build-rocm'
+$BuildRoot = Join-Path $WorkRoot 'build'
+$BenchRoot = Join-Path $WorkRoot 'benches'
+$Bin = Join-Path $BenchRoot 'bin'
+$CpuBuild = Join-Path $BuildRoot 'cpu'
+$RocmBuild = Join-Path $BuildRoot 'rocm'
 $VcVars = 'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat'
 $Python = 'C:\Program Files\Python313\python.exe'
 
@@ -27,6 +30,10 @@ foreach ($path in @($OldDll, $RocmPath, $VcVars, $Python)) {
     if (-not (Test-Path $path)) { throw "Required path not found: $path" }
 }
 New-Item -ItemType Directory -Force -Path $Bin | Out-Null
+New-Item -ItemType Directory -Force -Path $BuildRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $BenchRoot | Out-Null
+$env:LIGHTGBM_RDNA2_TEMP = $BenchRoot
+$env:LIGHTGBM_RDNA2_BIN = $Bin
 Copy-Item -Force $OldDll (Join-Path $Bin 'lightgbm_old.dll')
 
 function Invoke-CmdChecked([string]$Command) {
@@ -37,10 +44,11 @@ function Invoke-CmdChecked([string]$Command) {
 
 Write-Host '=== Build LightGBM 4.7.0 CPU ==='
 Remove-Item -Recurse -Force $CpuBuild -ErrorAction SilentlyContinue
-$cpuCommand = "call `"$VcVars`" && cmake -S `"$Repo`" -B `"$CpuBuild`" -G Ninja -DUSE_ROCM=OFF -DUSE_GPU=OFF -DUSE_CUDA=OFF -DBUILD_CLI=ON -DBUILD_STATIC_LIB=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build `"$CpuBuild`" -j 8"
+$cpuOut = Join-Path $CpuBuild 'out'
+$cpuCommand = "call `"$VcVars`" && cmake -S `"$Repo`" -B `"$CpuBuild`" -G Ninja -DUSE_ROCM=OFF -DUSE_GPU=OFF -DUSE_CUDA=OFF -DBUILD_CLI=ON -DBUILD_STATIC_LIB=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=`"$cpuOut`" -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=`"$cpuOut`" -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY=`"$cpuOut`" && cmake --build `"$CpuBuild`" -j 8"
 Invoke-CmdChecked $cpuCommand
-$cpuDll = Join-Path $Repo 'lib_lightgbm.dll'
-$cpuExe = Join-Path $Repo 'lightgbm.exe'
+$cpuDll = Join-Path $cpuOut 'lib_lightgbm.dll'
+$cpuExe = Join-Path $cpuOut 'lightgbm.exe'
 if (-not (Test-Path $cpuDll)) { throw "CPU build did not produce $cpuDll" }
 Copy-Item -Force $cpuDll (Join-Path $Bin 'lightgbm_4.7.0_cpu.dll')
 if (Test-Path $cpuExe) { Copy-Item -Force $cpuExe (Join-Path $Bin 'lightgbm_4.7.0_cpu.exe') }
@@ -50,10 +58,11 @@ Remove-Item -Recurse -Force $RocmBuild -ErrorAction SilentlyContinue
 $clang = ($RocmPath -replace '\\','/') + '/bin/clang.exe'
 $clangxx = ($RocmPath -replace '\\','/') + '/bin/clang++.exe'
 $rocmCmake = $RocmPath -replace '\\','/'
-$rocmCommand = "call `"$VcVars`" && set `"PATH=$RocmPath\bin;%PATH%`" && set `"HIP_PATH=$RocmPath`" && set `"HIP_PLATFORM=amd`" && cmake -S `"$Repo`" -B `"$RocmBuild`" -G Ninja -DUSE_ROCM=ON -DUSE_GPU=OFF -DUSE_CUDA=OFF -DBUILD_CLI=ON -DBUILD_STATIC_LIB=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=`"$clang`" -DCMAKE_CXX_COMPILER=`"$clangxx`" -DCMAKE_HIP_COMPILER=`"$clangxx`" -DCMAKE_HIP_COMPILER_ROCM_ROOT=`"$rocmCmake`" -DCMAKE_HIP_ARCHITECTURES=gfx1030 -DCMAKE_PREFIX_PATH=`"$rocmCmake`" && cmake --build `"$RocmBuild`" -j 8"
+$rocmOut = Join-Path $RocmBuild 'out'
+$rocmCommand = "call `"$VcVars`" && set `"PATH=$RocmPath\bin;%PATH%`" && set `"HIP_PATH=$RocmPath`" && set `"HIP_PLATFORM=amd`" && cmake -S `"$Repo`" -B `"$RocmBuild`" -G Ninja -DUSE_ROCM=ON -DUSE_GPU=OFF -DUSE_CUDA=OFF -DBUILD_CLI=ON -DBUILD_STATIC_LIB=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=`"$clang`" -DCMAKE_CXX_COMPILER=`"$clangxx`" -DCMAKE_HIP_COMPILER=`"$clangxx`" -DCMAKE_HIP_COMPILER_ROCM_ROOT=`"$rocmCmake`" -DCMAKE_HIP_ARCHITECTURES=gfx1030 -DCMAKE_PREFIX_PATH=`"$rocmCmake`" -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=`"$rocmOut`" -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=`"$rocmOut`" -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY=`"$rocmOut`" && cmake --build `"$RocmBuild`" -j 8"
 Invoke-CmdChecked $rocmCommand
-$rocmDll = Join-Path $Repo '_lightgbm.dll'
-$rocmExe = Join-Path $Repo 'lightgbm.exe'
+$rocmDll = Join-Path $rocmOut '_lightgbm.dll'
+$rocmExe = Join-Path $rocmOut 'lightgbm.exe'
 if (-not (Test-Path $rocmDll)) { throw "ROCm build did not produce $rocmDll" }
 if (-not (Test-Path $rocmExe)) { throw "ROCm build did not produce $rocmExe" }
 Copy-Item -Force $rocmDll (Join-Path $Bin 'lightgbm_4.7.0_rocm.dll')

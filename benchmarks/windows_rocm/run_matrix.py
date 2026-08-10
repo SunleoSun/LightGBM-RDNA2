@@ -10,7 +10,7 @@ import sys
 from run_benchmarks import PROFILE_CONFIGS, SMOKE_PROFILES, STRESS_PROFILES
 
 HERE = Path(__file__).resolve().parent
-TEMP_ROOT = Path(os.environ.get("LIGHTGBM_RDNA2_TEMP", r"C:\Temp\lightgbm-rdna2-temp"))
+TEMP_ROOT = Path(os.environ.get("LIGHTGBM_RDNA2_TEMP", r"C:\Temp\LightGBM-RDNA2\benches"))
 
 
 def run_profile(profile: str, iterations: int, train_rows: int, valid_rows: int, features: int, modes: str) -> dict:

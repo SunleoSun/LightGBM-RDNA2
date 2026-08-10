@@ -14,8 +14,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
-BIN = HERE / "bin"
-TEMP_ROOT = Path(os.environ.get("LIGHTGBM_RDNA2_TEMP", r"C:\Temp\lightgbm-rdna2-temp"))
+TEMP_ROOT = Path(os.environ.get("LIGHTGBM_RDNA2_TEMP", r"C:\Temp\LightGBM-RDNA2\benches"))
+BIN = Path(os.environ.get("LIGHTGBM_RDNA2_BIN", str(TEMP_ROOT / "bin")))
 DATA = TEMP_ROOT / "data"
 ARTIFACTS = TEMP_ROOT / "artifacts"
 SEED = 20260809

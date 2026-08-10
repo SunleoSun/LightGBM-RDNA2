@@ -54,6 +54,6 @@ The build wrapper can build and run the same suites:
 
 `-MatrixIterations N` overrides the suite default when using the build wrapper. Smoke defaults to 6 trees, stress to 20, and production to 100.
 
-Runtime datasets, models, predictions, logs/results, and matrix summaries are kept under `C:\Temp\lightgbm-rdna2-temp` by default instead of cluttering `C:\Temp` or the repository. Set `LIGHTGBM_RDNA2_TEMP` to override that root. Profile artifacts live under `<temp-root>/artifacts/<profile>/`; matrix summaries live under `<temp-root>/artifacts/matrix_*.json`. The first smoke run can be slower while its 5,000-row validation files are generated; subsequent runs reuse that cache.
+The Google Drive checkout is source-only. All generated state lives under `C:\Temp\LightGBM-RDNA2` by default: CMake/Ninja trees under `build\cpu` and `build\rocm`, benchmark binaries under `benches\bin`, generated datasets under `benches\data`, and models/predictions/logs/matrix summaries under `benches\artifacts`. `build_and_benchmark.ps1 -WorkRoot <path>` overrides the complete external work root. Standalone Python benchmark runs use `LIGHTGBM_RDNA2_TEMP` for the benches root and `LIGHTGBM_RDNA2_BIN` for binaries. The first smoke run can be slower while its 5,000-row validation files are generated; subsequent runs reuse that cache.
 
 Native Windows ROCm currently uses the CLI because the experimental HIP `_lightgbm.dll` still crashes during C-API booster creation with `device_type=cuda`; the CLI executes the same CUDA/HIP training path.
