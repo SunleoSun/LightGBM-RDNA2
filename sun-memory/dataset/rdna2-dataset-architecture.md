@@ -1,34 +1,36 @@
 ---
-description: Planned RDNA2 dataset ownership, canonical binning contract, packed GPU representation, cache lifecycle, and dataset-construction optimization stages.
+description: RDNA2 canonical-bin ownership, implemented packed GPU representation, measured packing/upload costs, cache lifecycle, and dataset-construction optimization stages.
 ---
 
 # RDNA2 dataset architecture
 
-The RDNA2 backend must separate semantic dataset ownership from the physical layout used by HIP kernels. LightGBM `Dataset`, `FeatureGroup`, and `BinMapper` remain the canonical source of feature/bin meaning. The first RDNA2 backend must not invent different cut points or rebucket raw values, because that would mix learner correctness with dataset correctness.
+The RDNA2 backend separates semantic dataset ownership from the physical layout used by HIP kernels. LightGBM `Dataset`, `FeatureGroup`, and `BinMapper` remain the canonical source of feature/bin meaning. RDNA2 must not invent different cut points or rebucket raw values while learner correctness is being established.
 
-The intended ownership chain is:
+The ownership chain is:
 
 `raw input -> canonical LightGBM Dataset/BinMapper -> RDNA2DatasetView -> RDNA2PackedDataset -> RDNA2HistogramEngine`
 
-`RDNA2DatasetView` is a zero-copy or low-copy semantic adapter where possible. It exposes canonical feature-to-bin mappings, missing/default-bin semantics, feature-group metadata, row count, max-bin specialization, and the row/column access needed to build the packed representation. It must not redefine bin boundaries.
+`RDNA2DatasetView` is the semantic adapter. It exposes canonical feature-to-bin mappings, missing/default-bin semantics, feature-group metadata, row count, max-bin specialization, and the row/column access needed to build the packed representation. It must not redefine bin boundaries.
 
-`RDNA2PackedDataset` is a derived physical representation owned by the RDNA2 backend. It may use layouts that differ completely from CPU/OpenCL/CUDA storage as long as every packed value maps back to the same canonical bin. H64 and H128 should be independent packed specializations. Candidate layouts include byte-packed bins and aligned `uint32 feature4[group][row]` tiles, evolving toward SuperTile-friendly `[feature tile][row]` storage that reuses row state across 8-16 features.
+The first `RDNA2HistogramEngine` dataset layer is implemented. It accepts only gfx1030, enumerates dense single-feature groups, reads their exact canonical bin IDs through `DenseBinIterator`, packs four byte-sized groups into one `uint32`, and uploads tuple-major `[feature4][row]` storage to persistent device memory. It deliberately does not apply the legacy OpenCL bin multipliers/random bank offsets because the packed values must remain canonical LightGBM bins. H64 eligibility is detected from the canonical per-group bin counts. `RDNA2TreeLearner` constructs this representation during initialization while histogram production still uses the Serial correctness fallback.
 
-The first implementation should build the packed representation after canonical Dataset construction and keep it resident for the lifetime of the training Dataset. Repacking per tree or per boosting iteration is forbidden. Train and validation caches must be keyed by dataset identity plus binning-relevant configuration, especially `max_bin`; H64 and H128 caches are not interchangeable.
+For the 40k x 3000 production-shaped H64 dataset, the packed device image is about 114.44 MiB (`750 feature4 tuples * 40000 rows * 4 bytes`). A representative gfx1030 probe measured about 25 ms for CPU packing and about 12 ms for the 114 MiB H2D copy after allocation. The first ROCm device allocation/context path cost about 456 ms in that process, which dominates one-time RDNA2 initialization; this cost is distinct from the actual packing and transfer and should not be mistaken for per-tree work. The temporary host packed vector is released when initialization returns; the device representation persists for the learner lifetime.
 
-Dataset construction is an explicit later optimization surface because production observations show it can consume comparable or greater wall time and peak RAM than training. Measure raw parse/load, sampling for bin construction, `BinMapper` construction, canonical bin population, RDNA2 packing, H2D upload, and training separately. Peak host RAM and device RAM belong in the benchmark contract alongside time.
+The packing loop has a production fast path for four ordinary 8-bit dense groups: it reads the four canonical iterators in one row pass and writes one aligned `uint32`, avoiding four read/modify/write passes over the 114 MiB staging buffer. Dense 4-bit groups and incomplete final tuples use a correctness fallback.
+
+Future `RDNA2PackedDataset` work may change the physical representation as long as every packed value maps back to the same canonical bin. H64 and H128 can diverge physically. Candidate next layouts are the current aligned `uint32 feature4[group][row]` input and SuperTile-friendly `[feature tile][row]` storage that reuses row state across 8-16 features. Repacking per tree or boosting iteration is forbidden.
+
+Dataset construction remains an explicit optimization surface because production observations show it can consume comparable or greater wall time and peak RAM than training. Measure raw parse/load, sampling for bin construction, `BinMapper` construction, canonical bin population, RDNA2 packing, device allocation/context initialization, H2D upload, and training separately. Peak host RAM and device RAM belong in the benchmark contract alongside time.
 
 Optimization order for dataset work:
 
-1. Preserve canonical CPU-created bins while introducing `RDNA2DatasetView` and one-time packed GPU storage.
-2. Add dataset timing and peak-memory measurements so the dominant stages are known rather than inferred from total initialization time.
-3. Remove avoidable copies and repeated row/column transforms while packing; pre-size final buffers and parallelize independent feature/tile packing.
-4. Add a persistent RDNA2 packed cache for repeated Stage-1/Stage-2 training on identical data and binning configuration. Loading a compatible cache should bypass repacking and ideally allow direct or staged H2D upload.
+1. Preserve canonical CPU-created bins and persistent one-time packed GPU storage. This foundation is implemented.
+2. Add structured dataset timing and peak-memory measurements so initialization costs are attributed correctly.
+3. Reduce the transient host staging footprint with chunked/pinned transfer only if profiling shows it matters; preserve large/coalesced transfers rather than replacing them with hundreds of tiny H2D copies.
+4. Add a persistent RDNA2 packed cache for repeated Stage-1/Stage-2 training on identical data and binning configuration. Cache identity must include binning-relevant configuration, especially `max_bin`; H64/H128 caches are not interchangeable.
 5. Consider memory mapping and overlapped packing/H2D when the lifetime and ownership contracts are stable.
-6. Only if canonical bin construction itself remains dominant, investigate `RDNA2DatasetBuilder` or GPU-assisted bin construction. Any accelerated builder must reproduce the canonical `BinMapper` contract for sampling, missing values, categorical handling, forced bins, `min_data_in_bin`, and feature prefiltering before it can replace CPU binning.
+6. Only if canonical bin construction itself remains dominant, investigate `RDNA2DatasetBuilder` or GPU-assisted bin construction. Any accelerated builder must reproduce canonical `BinMapper` behavior for sampling, missing values, categorical handling, forced bins, `min_data_in_bin`, and feature prefiltering.
 
-The long-term component relationship is:
+The long-term component relationship remains:
 
 `RDNA2TreeLearner(Serial semantics) -> RDNA2HistogramEngine -> RDNA2DatasetView -> RDNA2PackedDataset`
-
-The dataset layer is therefore optimized early enough to matter to end-to-end latency, but only after the minimal `device_type=rdna2` semantic boundary and first correct histogram offload are established.
