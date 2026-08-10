@@ -260,19 +260,26 @@ class RDNA2HistogramEngine {
     return matches;
   }
 
-  bool EnsureCanonicalHistogramPinned(hist_t* host_histogram) {
-    if (registered_histogram_buffers_.find(host_histogram) != registered_histogram_buffers_.end()) {
-      return true;
+  hist_t* EnsureCanonicalHistogramMapped(hist_t* host_histogram) {
+    if (registered_histogram_buffers_.find(host_histogram) == registered_histogram_buffers_.end()) {
+      const size_t bytes = num_total_bins_ * 2 * sizeof(hist_t);
+      const cudaError_t err = cudaHostRegister(
+          host_histogram, bytes, cudaHostRegisterPortable | cudaHostRegisterMapped);
+      if (err != cudaSuccess) {
+        Log::Warning("RDNA2 could not map canonical histogram buffer; falling back to device histogram: %s",
+                     cudaGetErrorString(err));
+        return nullptr;
+      }
+      registered_histogram_buffers_.insert(host_histogram);
     }
-    const size_t bytes = num_total_bins_ * 2 * sizeof(hist_t);
-    const cudaError_t err = cudaHostRegister(host_histogram, bytes, cudaHostRegisterPortable);
+    void* device_ptr = nullptr;
+    const cudaError_t err = cudaHostGetDevicePointer(&device_ptr, host_histogram, 0);
     if (err != cudaSuccess) {
-      Log::Warning("RDNA2 could not pin canonical histogram buffer; falling back to staging copy: %s",
+      Log::Warning("RDNA2 could not get canonical histogram device alias; falling back to device histogram: %s",
                    cudaGetErrorString(err));
-      return false;
+      return nullptr;
     }
-    registered_histogram_buffers_.insert(host_histogram);
-    return true;
+    return static_cast<hist_t*>(device_ptr);
   }
 
   bool h64_eligible() const { return h64_eligible_; }

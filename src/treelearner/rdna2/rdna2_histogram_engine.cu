@@ -267,6 +267,9 @@ bool RDNA2HistogramEngine::ConstructHistogram(
   auto stage_start = std::chrono::steady_clock::now();
 #endif
 
+  hist_t* mapped_histogram = EnsureCanonicalHistogramMapped(host_histogram);
+  hist_t* kernel_histogram = mapped_histogram != nullptr ? mapped_histogram : device_histogram();
+
   const int num_groups = static_cast<int>(dense_feature_groups_.size());
   const dim3 block(kHistogramThreads);
   constexpr int kH64SuperTileTuples = 2;
@@ -278,39 +281,36 @@ bool RDNA2HistogramEngine::ConstructHistogram(
         reinterpret_cast<const uint32_t*>(packed_features()),
         device_gradients(), device_hessians(), device_indices, group_bin_offsets(),
         feature4_masks(), num_data_, num_data, static_cast<int>(num_feature4_),
-        num_groups, device_histogram());
+        num_groups, kernel_histogram);
   } else {
     const dim3 grid(static_cast<unsigned int>(num_feature4_));
     if (h64_eligible_) {
       RDNA2HistogramKernel<64, 4><<<grid, block, 0, stream()>>>(
           reinterpret_cast<const uint32_t*>(packed_features()),
           device_gradients(), device_hessians(), device_indices, group_bin_offsets(),
-          feature4_masks(), num_data_, num_data, num_groups, device_histogram());
+          feature4_masks(), num_data_, num_data, num_groups, kernel_histogram);
     } else {
       RDNA2HistogramKernel<128, 4><<<grid, block, 0, stream()>>>(
           reinterpret_cast<const uint32_t*>(packed_features()),
           device_gradients(), device_hessians(), device_indices, group_bin_offsets(),
-          feature4_masks(), num_data_, num_data, num_groups, device_histogram());
+          feature4_masks(), num_data_, num_data, num_groups, kernel_histogram);
     }
   }
-#ifdef TIMETAG
   SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
+#ifdef TIMETAG
   auto stage_end = std::chrono::steady_clock::now();
   kernel_ms = std::chrono::duration<double, std::milli>(stage_end - stage_start).count();
   stage_start = std::chrono::steady_clock::now();
 #endif
-
-  const bool direct_d2h = EnsureCanonicalHistogramPinned(host_histogram);
-  hist_t* d2h_target = direct_d2h ? host_histogram : host_histogram_staging();
-  CopyFromCUDADeviceToHostAsync(d2h_target, device_histogram(), num_total_bins_ * 2,
-                                stream(), __FILE__, __LINE__);
-  SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
-#ifdef TIMETAG
-  stage_end = std::chrono::steady_clock::now();
-  d2h_ms = std::chrono::duration<double, std::milli>(stage_end - stage_start).count();
-#endif
   double host_copy_ms = 0.0;
-  if (!direct_d2h) {
+  if (mapped_histogram == nullptr) {
+    CopyFromCUDADeviceToHostAsync(host_histogram_staging(), device_histogram(), num_total_bins_ * 2,
+                                  stream(), __FILE__, __LINE__);
+    SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
+#ifdef TIMETAG
+    stage_end = std::chrono::steady_clock::now();
+    d2h_ms = std::chrono::duration<double, std::milli>(stage_end - stage_start).count();
+#endif
     const auto host_copy_start = std::chrono::steady_clock::now();
     std::memcpy(host_histogram, host_histogram_staging(), num_total_bins_ * 2 * sizeof(hist_t));
 #ifdef TIMETAG

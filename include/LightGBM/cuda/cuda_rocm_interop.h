@@ -34,6 +34,8 @@
 #endif
 #define cudaHostRegister hipHostRegister
 #define cudaHostRegisterPortable hipHostRegisterPortable
+#define cudaHostRegisterMapped hipHostRegisterMapped
+#define cudaHostGetDevicePointer hipHostGetDevicePointer
 #define cudaHostUnregister hipHostUnregister
 #define cudaMalloc hipMalloc
 #define cudaMemcpy hipMemcpy
