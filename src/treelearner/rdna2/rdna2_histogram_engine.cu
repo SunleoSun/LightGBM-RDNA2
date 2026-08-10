@@ -210,20 +210,29 @@ bool RDNA2HistogramEngine::ConstructHistogram(
                                        cudaMemcpyHostToDevice, stream()));
 
   const data_size_t* device_indices = nullptr;
-  const bool had_index_copy = data_indices != nullptr && num_data < num_data_;
-  if (had_index_copy) {
+  const bool needs_indices = data_indices != nullptr && num_data < num_data_;
+  if (needs_indices) {
+    const bool use_preloaded_indices = ConsumePreloadedDataIndices(data_indices, num_data);
+    if (use_preloaded_indices) {
+      device_indices = device_data_indices();
 #ifdef TIMETAG
-    const auto index_start = std::chrono::steady_clock::now();
+      ++profile_index_preload_hits_;
 #endif
-    CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(device_data_indices(), data_indices,
-                                         static_cast<size_t>(num_data) * sizeof(data_size_t),
-                                         cudaMemcpyHostToDevice, stream()));
-    device_indices = device_data_indices();
+    } else {
 #ifdef TIMETAG
-    SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
-    const auto index_end = std::chrono::steady_clock::now();
-    index_h2d_ms = std::chrono::duration<double, std::milli>(index_end - index_start).count();
+      ++profile_index_fallback_copies_;
+      const auto index_start = std::chrono::steady_clock::now();
 #endif
+      CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(device_data_indices(), data_indices,
+                                           static_cast<size_t>(num_data) * sizeof(data_size_t),
+                                           cudaMemcpyHostToDevice, stream()));
+      device_indices = device_data_indices();
+#ifdef TIMETAG
+      SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
+      const auto index_end = std::chrono::steady_clock::now();
+      index_h2d_ms = std::chrono::duration<double, std::milli>(index_end - index_start).count();
+#endif
+    }
   }
 
 #ifdef TIMETAG

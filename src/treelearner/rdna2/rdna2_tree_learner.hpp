@@ -48,6 +48,19 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
     if (!config_->use_quantized_grad) {
       Common::FunctionTimer fun_timer("RDNA2TreeLearner::BeforeTrainH2D", global_timer);
       histogram_engine_.BeforeTrain(gradients_, hessians_);
+      if (histogram_engine_.h64_eligible() || histogram_engine_.h128_eligible()) {
+        histogram_engine_.PreloadDataIndices(smaller_leaf_splits_->data_indices(),
+                                             smaller_leaf_splits_->num_data_in_leaf());
+      }
+    }
+  }
+
+  void Split(Tree* tree, int best_leaf, int* left_leaf, int* right_leaf) override {
+    SerialTreeLearner::Split(tree, best_leaf, left_leaf, right_leaf);
+    if (!config_->use_quantized_grad &&
+        (histogram_engine_.h64_eligible() || histogram_engine_.h128_eligible())) {
+      histogram_engine_.PreloadDataIndices(smaller_leaf_splits_->data_indices(),
+                                           smaller_leaf_splits_->num_data_in_leaf());
     }
   }
 

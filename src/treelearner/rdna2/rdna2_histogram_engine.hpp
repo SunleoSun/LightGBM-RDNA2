@@ -31,10 +31,11 @@ class RDNA2HistogramEngine {
   ~RDNA2HistogramEngine() {
 #ifdef TIMETAG
     if (profile_histogram_calls_ > 0) {
-      Log::Info("RDNA2 profile: hist_calls=%llu grad_h2d_ms=%.3f index_h2d_ms=%.3f memset_ms=%.3f kernel_ms=%.3f d2h_ms=%.3f host_copy_ms=%.3f",
+      Log::Info("RDNA2 profile: hist_calls=%llu grad_h2d_ms=%.3f index_h2d_ms=%.3f memset_ms=%.3f kernel_ms=%.3f d2h_ms=%.3f host_copy_ms=%.3f index_preload_hits=%llu index_fallback_copies=%llu",
                 static_cast<unsigned long long>(profile_histogram_calls_), profile_grad_h2d_ms_,
                 profile_index_h2d_ms_, profile_memset_ms_, profile_kernel_ms_, profile_d2h_ms_,
-                profile_host_copy_ms_);
+                profile_host_copy_ms_, static_cast<unsigned long long>(profile_index_preload_hits_),
+                static_cast<unsigned long long>(profile_index_fallback_copies_));
     }
 #endif
     if (stream_ != nullptr) {
@@ -71,6 +72,7 @@ class RDNA2HistogramEngine {
 
     train_data_ = train_data;
     num_data_ = train_data_->num_data();
+    InvalidatePreloadedDataIndices();
     dense_feature_groups_.clear();
     dense_feature_num_bins_.clear();
 
@@ -209,6 +211,19 @@ class RDNA2HistogramEngine {
   bool ConstructHistogram(const std::vector<int8_t>& is_feature_used, const data_size_t* data_indices,
                           data_size_t num_data, hist_t* host_histogram);
 
+  void PreloadDataIndices(const data_size_t* data_indices, data_size_t num_data) {
+    InvalidatePreloadedDataIndices();
+    if (data_indices == nullptr || num_data <= 0 || num_data >= num_data_) {
+      return;
+    }
+    CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(device_data_indices(), data_indices,
+                                         static_cast<size_t>(num_data) * sizeof(data_size_t),
+                                         cudaMemcpyHostToDevice, stream()));
+    preloaded_data_indices_ = data_indices;
+    preloaded_data_count_ = num_data;
+    preloaded_data_valid_ = true;
+  }
+
   void RegisterDataIndices(const data_size_t* data_indices, size_t count) {
     UnregisterDataIndices();
     if (data_indices == nullptr || count == 0) {
@@ -226,11 +241,22 @@ class RDNA2HistogramEngine {
   }
 
   void UnregisterDataIndices() {
+    InvalidatePreloadedDataIndices();
     if (registered_data_indices_ != nullptr) {
+      if (stream_ != nullptr) {
+        SynchronizeCUDAStream(stream_, __FILE__, __LINE__);
+      }
       CUDASUCCESS_OR_FATAL(cudaHostUnregister(const_cast<data_size_t*>(registered_data_indices_)));
       registered_data_indices_ = nullptr;
       registered_data_indices_count_ = 0;
     }
+  }
+
+  bool ConsumePreloadedDataIndices(const data_size_t* data_indices, data_size_t num_data) {
+    const bool matches = preloaded_data_valid_ && preloaded_data_indices_ == data_indices &&
+                         preloaded_data_count_ == num_data;
+    InvalidatePreloadedDataIndices();
+    return matches;
   }
 
   bool EnsureCanonicalHistogramPinned(hist_t* host_histogram) {
@@ -280,6 +306,12 @@ class RDNA2HistogramEngine {
 #endif
 
  private:
+  void InvalidatePreloadedDataIndices() {
+    preloaded_data_indices_ = nullptr;
+    preloaded_data_count_ = 0;
+    preloaded_data_valid_ = false;
+  }
+
   const Dataset* train_data_ = nullptr;
   data_size_t num_data_ = 0;
   size_t num_feature4_ = 0;
@@ -302,6 +334,9 @@ class RDNA2HistogramEngine {
   std::unordered_set<hist_t*> registered_histogram_buffers_;
   const data_size_t* registered_data_indices_ = nullptr;
   size_t registered_data_indices_count_ = 0;
+  const data_size_t* preloaded_data_indices_ = nullptr;
+  data_size_t preloaded_data_count_ = 0;
+  bool preloaded_data_valid_ = false;
 #ifdef TIMETAG
   uint64_t profile_histogram_calls_ = 0;
   double profile_grad_h2d_ms_ = 0.0;
@@ -310,6 +345,8 @@ class RDNA2HistogramEngine {
   double profile_kernel_ms_ = 0.0;
   double profile_d2h_ms_ = 0.0;
   double profile_host_copy_ms_ = 0.0;
+  uint64_t profile_index_preload_hits_ = 0;
+  uint64_t profile_index_fallback_copies_ = 0;
 #endif
 };
 
