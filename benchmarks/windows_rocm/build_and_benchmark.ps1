@@ -5,6 +5,8 @@ param(
     [int]$ValidRows = 50000,
     [int]$Features = 3000,
     [int]$Iterations = 100,
+    [ValidateSet('h64', 'h128', 'all')]
+    [string]$Profile = 'all',
     [double]$PredictionAtol = 1e-6,
     [double]$PredictionRtol = 1e-6
 )
@@ -55,5 +57,12 @@ Copy-Item -Force $rocmExe (Join-Path $Bin 'lightgbm_4.7.0_rocm.exe')
 
 Write-Host '=== Benchmark and correctness checks ==='
 $env:ROCM_PATH = $RocmPath
-& $Python (Join-Path $PSScriptRoot 'run_benchmarks.py') --train-rows $TrainRows --valid-rows $ValidRows --features $Features --iterations $Iterations --atol $PredictionAtol --rtol $PredictionRtol
-exit $LASTEXITCODE
+$profiles = if ($Profile -eq 'all') { @('h64', 'h128') } else { @($Profile) }
+$benchmarkFailed = $false
+foreach ($benchmarkProfile in $profiles) {
+    Write-Host "=== Profile $benchmarkProfile ==="
+    & $Python (Join-Path $PSScriptRoot 'run_benchmarks.py') --profile $benchmarkProfile --train-rows $TrainRows --valid-rows $ValidRows --features $Features --iterations $Iterations --atol $PredictionAtol --rtol $PredictionRtol
+    if ($LASTEXITCODE -ne 0) { $benchmarkFailed = $true }
+}
+if ($benchmarkFailed) { exit 2 }
+exit 0

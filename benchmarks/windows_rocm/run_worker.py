@@ -67,7 +67,9 @@ def main() -> int:
     p.add_argument("--pred-out", required=True)
     p.add_argument("--result-out", required=True)
     p.add_argument("--iterations", type=int, default=100)
+    p.add_argument("--params-json", required=True)
     args = p.parse_args()
+    profile = json.loads(args.params_json)
 
     payload = np.load(args.valid_npz)
     x_valid = np.ascontiguousarray(payload["X"], dtype=np.float32)
@@ -78,16 +80,22 @@ def main() -> int:
     H = C.c_void_p
     dataset = H()
     booster = H()
-    dataset_params = (
-        b"" if Path(args.train_file).suffix.lower() == ".bin"
-        else b"header=false label_column=0 max_bin=255 feature_pre_filter=false"
-    )
-    common = (
-        "objective=binary metric=auc learning_rate=0.05 num_leaves=4 max_depth=8 "
-        "min_data_in_leaf=20 max_bin=255 feature_fraction=1.0 bagging_fraction=1.0 bagging_freq=0 "
-        "verbosity=-1 seed=20260809 feature_fraction_seed=20260809 bagging_seed=20260809 "
-        "data_random_seed=20260809 deterministic=true force_col_wise=true"
-    )
+    if Path(args.train_file).suffix.lower() == ".bin":
+        dataset_params = f"max_bin={int(profile['max_bin'])} feature_pre_filter=false".encode()
+    else:
+        dataset_params = f"header=false label_column=0 max_bin={int(profile['max_bin'])} feature_pre_filter=false".encode()
+    common = " ".join([
+        "objective=binary", "metric=auc",
+        f"learning_rate={profile['learning_rate']}", f"num_leaves={profile['num_leaves']}",
+        f"max_depth={profile['max_depth']}", f"min_data_in_leaf={profile['min_data_in_leaf']}",
+        f"max_bin={profile['max_bin']}", f"feature_fraction={profile['feature_fraction']}",
+        f"bagging_fraction={profile['bagging_fraction']}", f"bagging_freq={profile['bagging_freq']}",
+        f"lambda_l1={profile['lambda_l1']}", f"lambda_l2={profile['lambda_l2']}",
+        f"min_gain_to_split={profile['min_gain_to_split']}", f"path_smooth={profile['path_smooth']}",
+        "verbosity=-1", "seed=20260809", "feature_fraction_seed=20260809",
+        "bagging_seed=20260809", "data_random_seed=20260809",
+        "deterministic=true", "force_col_wise=true",
+    ])
     if args.device == "cpu":
         device_params = "device_type=cpu"
     else:

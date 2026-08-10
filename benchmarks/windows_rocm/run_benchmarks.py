@@ -19,6 +19,66 @@ DATA = HERE / "data"
 ARTIFACTS = HERE / "artifacts"
 SEED = 20260809
 
+PROFILE_CONFIGS = {
+    "h64": {
+        "description": "Stage 1-like H64 workload",
+        "learning_rate": 0.075,
+        "num_leaves": 40,
+        "max_depth": 6,
+        "min_data_in_leaf": 50,
+        "max_bin": 63,
+        "feature_fraction": 0.9,
+        "bagging_fraction": 0.7,
+        "bagging_freq": 1,
+        "lambda_l1": 0.0,
+        "lambda_l2": 0.0,
+        "min_gain_to_split": 0.0,
+        "path_smooth": 0.0,
+    },
+    "h128": {
+        "description": "Representative Stage 2 H128 workload",
+        "learning_rate": 0.05,
+        "num_leaves": 40,
+        "max_depth": 6,
+        "min_data_in_leaf": 50,
+        "max_bin": 127,
+        "feature_fraction": 1.0,
+        "bagging_fraction": 0.9,
+        "bagging_freq": 1,
+        "lambda_l1": 0.1,
+        "lambda_l2": 0.1,
+        "min_gain_to_split": 0.0,
+        "path_smooth": 0.0,
+    },
+}
+
+
+def profile_param_string(profile: dict) -> str:
+    parts = [
+        "objective=binary",
+        "metric=auc",
+        f"learning_rate={profile['learning_rate']}",
+        f"num_leaves={profile['num_leaves']}",
+        f"max_depth={profile['max_depth']}",
+        f"min_data_in_leaf={profile['min_data_in_leaf']}",
+        f"max_bin={profile['max_bin']}",
+        f"feature_fraction={profile['feature_fraction']}",
+        f"bagging_fraction={profile['bagging_fraction']}",
+        f"bagging_freq={profile['bagging_freq']}",
+        f"lambda_l1={profile['lambda_l1']}",
+        f"lambda_l2={profile['lambda_l2']}",
+        f"min_gain_to_split={profile['min_gain_to_split']}",
+        f"path_smooth={profile['path_smooth']}",
+        "verbosity=-1",
+        f"seed={SEED}",
+        f"feature_fraction_seed={SEED}",
+        f"bagging_seed={SEED}",
+        f"data_random_seed={SEED}",
+        "deterministic=true",
+        "force_col_wise=true",
+    ]
+    return " ".join(parts)
+
 
 def auc_score(y_true: np.ndarray, y_score: np.ndarray) -> float:
     y_true = np.asarray(y_true, dtype=np.int8)
@@ -82,7 +142,7 @@ def run_checked(cmd: list[str], env: dict[str, str] | None = None) -> subprocess
     return p
 
 
-def ensure_binary_dataset(old_dll: Path, train_text: Path, train_binary: Path) -> None:
+def ensure_binary_dataset(old_dll: Path, train_text: Path, train_binary: Path, max_bin: int) -> None:
     if train_binary.exists():
         return
     lib = __import__("ctypes").CDLL(str(old_dll.resolve()))
@@ -98,14 +158,15 @@ def ensure_binary_dataset(old_dll: Path, train_text: Path, train_binary: Path) -
             msg = lib.LGBM_GetLastError()
             raise RuntimeError(f"{where}: {msg.decode(errors='replace') if msg else 'unknown error'}")
     try:
-        chk(lib.LGBM_DatasetCreateFromFile(str(train_text.resolve()).encode(), b"header=false label_column=0 max_bin=255 feature_pre_filter=false", None, C.byref(ds)), "DatasetCreateFromFile")
+        dataset_params = f"header=false label_column=0 max_bin={max_bin} feature_pre_filter=false".encode()
+        chk(lib.LGBM_DatasetCreateFromFile(str(train_text.resolve()).encode(), dataset_params, None, C.byref(ds)), "DatasetCreateFromFile")
         chk(lib.LGBM_DatasetSaveBinary(ds, str(train_binary.resolve()).encode()), "DatasetSaveBinary")
     finally:
         if ds:
             lib.LGBM_DatasetFree(ds)
 
 
-def run_capi_variant(name: str, dll: Path, device: str, train_file: Path, valid_npz: Path, iterations: int) -> dict:
+def run_capi_variant(name: str, dll: Path, device: str, train_file: Path, valid_npz: Path, iterations: int, profile: dict) -> dict:
     model = ARTIFACTS / f"{name}.model.txt"
     pred = ARTIFACTS / f"{name}.predictions.txt"
     result = ARTIFACTS / f"{name}.json"
@@ -113,7 +174,7 @@ def run_capi_variant(name: str, dll: Path, device: str, train_file: Path, valid_
         sys.executable, str(HERE / "run_worker.py"), "--dll", str(dll), "--device", device,
         "--train-file", str(train_file), "--valid-npz", str(valid_npz),
         "--model-out", str(model), "--pred-out", str(pred), "--result-out", str(result),
-        "--iterations", str(iterations),
+        "--iterations", str(iterations), "--params-json", json.dumps(profile),
     ]
     run_checked(cmd)
     payload = json.loads(result.read_text(encoding="utf-8"))
@@ -121,7 +182,7 @@ def run_capi_variant(name: str, dll: Path, device: str, train_file: Path, valid_
     return payload
 
 
-def run_rocm_cli(name: str, exe: Path, train_file: Path, valid_features_file: Path, valid_npz: Path, iterations: int) -> dict:
+def run_rocm_cli(name: str, exe: Path, train_file: Path, valid_features_file: Path, valid_npz: Path, iterations: int, profile: dict) -> dict:
     model = ARTIFACTS / f"{name}.model.txt"
     pred = ARTIFACTS / f"{name}.predictions.txt"
     result = ARTIFACTS / f"{name}.json"
@@ -129,11 +190,8 @@ def run_rocm_cli(name: str, exe: Path, train_file: Path, valid_features_file: Pa
     rocm_bin = Path(os.environ.get("ROCM_PATH", r"C:\Program Files\AMD\ROCm\6.2")) / "bin"
     env["PATH"] = str(rocm_bin) + os.pathsep + env.get("PATH", "")
     common = [
-        "task=train", f"data={train_file}", "objective=binary", "metric=auc",
-        "learning_rate=0.05", "num_leaves=4", "max_depth=8", "min_data_in_leaf=20", "max_bin=255",
-        "feature_fraction=1.0", "bagging_fraction=1.0", "bagging_freq=0", "seed=20260809",
-        "feature_fraction_seed=20260809", "bagging_seed=20260809", "data_random_seed=20260809",
-        "deterministic=true", "force_col_wise=true", "device_type=cuda", "num_gpu=1", "gpu_device_id=0", "verbosity=1",
+        "task=train", f"data={train_file}", *profile_param_string(profile).split(),
+        "verbosity=1", "device_type=cuda", "num_gpu=1", "gpu_device_id=0",
         f"num_iterations={iterations}", f"output_model={model}",
     ]
     wall0 = time.perf_counter()
@@ -281,11 +339,13 @@ def compare(
 
 
 def main() -> int:
+    global ARTIFACTS
     p = argparse.ArgumentParser()
     p.add_argument("--train-rows", type=int, default=40000)
     p.add_argument("--valid-rows", type=int, default=50000)
     p.add_argument("--features", type=int, default=3000)
     p.add_argument("--iterations", type=int, default=100)
+    p.add_argument("--profile", choices=sorted(PROFILE_CONFIGS), default="h64")
     p.add_argument("--atol", type=float, default=1e-6)
     p.add_argument("--rtol", type=float, default=1e-6)
     p.add_argument("--auc-tol", type=float, default=5e-8)
@@ -295,8 +355,13 @@ def main() -> int:
     p.add_argument("--min-confident-fraction", type=float, default=0.05)
     args = p.parse_args()
 
+    profile = PROFILE_CONFIGS[args.profile]
+    ARTIFACTS = HERE / "artifacts" / args.profile
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    train_text, train_binary, valid_features_file, valid_npz = generate_dataset(args.train_rows, args.valid_rows, args.features)
+    train_text, _legacy_train_binary, valid_features_file, valid_npz = generate_dataset(
+        args.train_rows, args.valid_rows, args.features
+    )
+    train_binary = DATA / f"train_{args.train_rows}x{args.features}_maxbin{profile['max_bin']}.bin"
     required = {
         "old": BIN / "lightgbm_old.dll",
         "cpu": BIN / "lightgbm_4.7.0_cpu.dll",
@@ -307,12 +372,12 @@ def main() -> int:
     if missing:
         raise RuntimeError("missing benchmark binaries; run build_and_benchmark.ps1 first:\n" + "\n".join(missing))
 
-    ensure_binary_dataset(required["old"], train_text, train_binary)
+    ensure_binary_dataset(required["old"], train_text, train_binary, int(profile["max_bin"]))
     results = [
-        run_capi_variant("old_cpu", required["old"], "cpu", train_binary, valid_npz, args.iterations),
-        run_capi_variant("old_opencl_gpu", required["old"], "gpu", train_binary, valid_npz, args.iterations),
-        run_capi_variant("v470_cpu", required["cpu"], "cpu", train_binary, valid_npz, args.iterations),
-        run_rocm_cli("v470_rocm_gpu", required["rocm_exe"], train_binary, valid_features_file, valid_npz, args.iterations),
+        run_capi_variant("old_cpu", required["old"], "cpu", train_binary, valid_npz, args.iterations, profile),
+        run_capi_variant("old_opencl_gpu", required["old"], "gpu", train_binary, valid_npz, args.iterations, profile),
+        run_capi_variant("v470_cpu", required["cpu"], "cpu", train_binary, valid_npz, args.iterations, profile),
+        run_rocm_cli("v470_rocm_gpu", required["rocm_exe"], train_binary, valid_features_file, valid_npz, args.iterations, profile),
     ]
     y_valid = np.load(valid_npz)["y"]
     comparison = compare(
@@ -321,9 +386,10 @@ def main() -> int:
         args.min_confident_fraction,
     )
     report = {
+        "profile": args.profile,
         "config": {
-            "objective": "binary", "metric": "auc", "n_estimators": args.iterations,
-            "max_depth": 8, "num_leaves": 4, "train_rows": args.train_rows,
+            **profile, "objective": "binary", "metric": "auc",
+            "n_estimators": args.iterations, "train_rows": args.train_rows,
             "valid_rows": args.valid_rows, "features": args.features, "seed": SEED,
         },
         "results": results, "comparison": comparison,
@@ -331,7 +397,7 @@ def main() -> int:
     report_path = ARTIFACTS / "summary.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
-    print("\n=== BENCHMARK SUMMARY ===")
+    print(f"\n=== BENCHMARK SUMMARY [{args.profile}: max_bin={profile['max_bin']}] ===")
     print(f"{'mode':<20} {'train_s':>10} {'iter_ms':>10} {'auc':>10} {'pred_diff':>12} {'trees':>7} {'struct':>8}")
     cmp_by_name = {x["name"]: x for x in comparison["comparisons"]}
     for r in results:
