@@ -260,20 +260,26 @@ bool RDNA2HistogramEngine::ConstructHistogram(
   stage_start = std::chrono::steady_clock::now();
 #endif
 
-  CopyFromCUDADeviceToHostAsync(host_histogram_staging(), device_histogram(), num_total_bins_ * 2,
+  const bool direct_d2h = EnsureCanonicalHistogramPinned(host_histogram);
+  hist_t* d2h_target = direct_d2h ? host_histogram : host_histogram_staging();
+  CopyFromCUDADeviceToHostAsync(d2h_target, device_histogram(), num_total_bins_ * 2,
                                 stream(), __FILE__, __LINE__);
   SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
 #ifdef TIMETAG
   stage_end = std::chrono::steady_clock::now();
   d2h_ms = std::chrono::duration<double, std::milli>(stage_end - stage_start).count();
 #endif
-  const auto host_copy_start = std::chrono::steady_clock::now();
-  std::memcpy(host_histogram, host_histogram_staging(), num_total_bins_ * 2 * sizeof(hist_t));
+  double host_copy_ms = 0.0;
+  if (!direct_d2h) {
+    const auto host_copy_start = std::chrono::steady_clock::now();
+    std::memcpy(host_histogram, host_histogram_staging(), num_total_bins_ * 2 * sizeof(hist_t));
 #ifdef TIMETAG
-  const auto host_copy_end = std::chrono::steady_clock::now();
-  ProfileAddHistogramCall(
-      index_h2d_ms, memset_ms, kernel_ms, d2h_ms,
-      std::chrono::duration<double, std::milli>(host_copy_end - host_copy_start).count());
+    const auto host_copy_end = std::chrono::steady_clock::now();
+    host_copy_ms = std::chrono::duration<double, std::milli>(host_copy_end - host_copy_start).count();
+#endif
+  }
+#ifdef TIMETAG
+  ProfileAddHistogramCall(index_h2d_ms, memset_ms, kernel_ms, d2h_ms, host_copy_ms);
 #endif
   return true;
 }

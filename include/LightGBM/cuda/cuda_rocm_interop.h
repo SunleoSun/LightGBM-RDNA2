@@ -32,6 +32,9 @@
 #define cudaHostAlloc hipHostAlloc
 #define cudaHostAllocPortable hipHostMallocPortable
 #endif
+#define cudaHostRegister hipHostRegister
+#define cudaHostRegisterPortable hipHostRegisterPortable
+#define cudaHostUnregister hipHostUnregister
 #define cudaMalloc hipMalloc
 #define cudaMemcpy hipMemcpy
 #define cudaMemcpyAsync hipMemcpyAsync

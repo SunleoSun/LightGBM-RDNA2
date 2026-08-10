@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include <unordered_set>
 
 #include "../../io/dense_bin.hpp"
 
@@ -38,6 +39,12 @@ class RDNA2HistogramEngine {
 #endif
     if (stream_ != nullptr) {
       SynchronizeCUDAStream(stream_, __FILE__, __LINE__);
+    }
+    for (auto* ptr : registered_histogram_buffers_) {
+      CUDASUCCESS_OR_FATAL(cudaHostUnregister(ptr));
+    }
+    registered_histogram_buffers_.clear();
+    if (stream_ != nullptr) {
       CUDASUCCESS_OR_FATAL(cudaStreamDestroy(stream_));
       stream_ = nullptr;
     }
@@ -185,6 +192,21 @@ class RDNA2HistogramEngine {
 
   bool ConstructHistogram(const data_size_t* data_indices, data_size_t num_data, hist_t* host_histogram);
 
+  bool EnsureCanonicalHistogramPinned(hist_t* host_histogram) {
+    if (registered_histogram_buffers_.find(host_histogram) != registered_histogram_buffers_.end()) {
+      return true;
+    }
+    const size_t bytes = num_total_bins_ * 2 * sizeof(hist_t);
+    const cudaError_t err = cudaHostRegister(host_histogram, bytes, cudaHostRegisterPortable);
+    if (err != cudaSuccess) {
+      Log::Warning("RDNA2 could not pin canonical histogram buffer; falling back to staging copy: %s",
+                   cudaGetErrorString(err));
+      return false;
+    }
+    registered_histogram_buffers_.insert(host_histogram);
+    return true;
+  }
+
   bool h64_eligible() const { return h64_eligible_; }
   bool h128_eligible() const { return h128_eligible_; }
   data_size_t num_data() const { return num_data_; }
@@ -232,6 +254,7 @@ class RDNA2HistogramEngine {
   hist_t* host_histogram_staging_ = nullptr;
   size_t host_histogram_staging_size_ = 0;
   cudaStream_t stream_ = nullptr;
+  std::unordered_set<hist_t*> registered_histogram_buffers_;
 #ifdef TIMETAG
   uint64_t profile_histogram_calls_ = 0;
   double profile_grad_h2d_ms_ = 0.0;
