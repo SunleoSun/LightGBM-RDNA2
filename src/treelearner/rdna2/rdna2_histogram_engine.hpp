@@ -89,9 +89,22 @@ class RDNA2HistogramEngine {
     }
 
     num_feature4_ = (dense_feature_groups_.size() + 3) / 4;
+    std::vector<int> host_group_feature_indices(static_cast<size_t>(num_feature_groups), -1);
+    for (int feature = 0; feature < train_data_->num_features(); ++feature) {
+      const int group = train_data_->Feature2Group(feature);
+      if (group >= 0 && group < num_feature_groups) {
+        if (host_group_feature_indices[static_cast<size_t>(group)] >= 0) {
+          host_group_feature_indices[static_cast<size_t>(group)] = -2;
+        } else {
+          host_group_feature_indices[static_cast<size_t>(group)] = feature;
+        }
+      }
+    }
     const bool all_dense_single =
         dense_feature_groups_.size() == static_cast<size_t>(num_feature_groups) &&
-        !dense_feature_groups_.empty();
+        !dense_feature_groups_.empty() &&
+        std::all_of(host_group_feature_indices.begin(), host_group_feature_indices.end(),
+                    [](int feature) { return feature >= 0; });
     h64_eligible_ = all_dense_single &&
                     std::all_of(dense_feature_num_bins_.begin(), dense_feature_num_bins_.end(),
                                 [](int bins) { return bins <= 64; });
@@ -170,6 +183,8 @@ class RDNA2HistogramEngine {
     const auto packed_ready = std::chrono::steady_clock::now();
     packed_features_.Resize(host_packed.size());
     group_bin_offsets_.InitFromHostVector(host_group_bin_offsets);
+    group_feature_indices_.InitFromHostVector(host_group_feature_indices);
+    feature_used_.Resize(static_cast<size_t>(train_data_->num_features()));
     gradients_.Resize(static_cast<size_t>(num_data_));
     hessians_.Resize(static_cast<size_t>(num_data_));
     data_indices_.Resize(static_cast<size_t>(num_data_));
@@ -190,7 +205,8 @@ class RDNA2HistogramEngine {
 
   void BeforeTrain(const score_t* gradients, const score_t* hessians);
 
-  bool ConstructHistogram(const data_size_t* data_indices, data_size_t num_data, hist_t* host_histogram);
+  bool ConstructHistogram(const std::vector<int8_t>& is_feature_used, const data_size_t* data_indices,
+                          data_size_t num_data, hist_t* host_histogram);
 
   bool EnsureCanonicalHistogramPinned(hist_t* host_histogram) {
     if (registered_histogram_buffers_.find(host_histogram) != registered_histogram_buffers_.end()) {
@@ -214,6 +230,8 @@ class RDNA2HistogramEngine {
   size_t num_total_bins() const { return num_total_bins_; }
   const PackedFeature4* packed_features() const { return packed_features_.RawDataReadOnly(); }
   const uint32_t* group_bin_offsets() const { return group_bin_offsets_.RawDataReadOnly(); }
+  const int* group_feature_indices() const { return group_feature_indices_.RawDataReadOnly(); }
+  int8_t* device_feature_used() { return feature_used_.RawData(); }
   score_t* device_gradients() { return gradients_.RawData(); }
   score_t* device_hessians() { return hessians_.RawData(); }
   data_size_t* device_data_indices() { return data_indices_.RawData(); }
@@ -247,6 +265,8 @@ class RDNA2HistogramEngine {
   std::vector<int> dense_feature_num_bins_;
   CUDAVector<PackedFeature4> packed_features_;
   CUDAVector<uint32_t> group_bin_offsets_;
+  CUDAVector<int> group_feature_indices_;
+  CUDAVector<int8_t> feature_used_;
   CUDAVector<score_t> gradients_;
   CUDAVector<score_t> hessians_;
   CUDAVector<data_size_t> data_indices_;

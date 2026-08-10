@@ -58,7 +58,7 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
     const bool only_smaller_leaf_needed = larger_leaf_histogram_array_ == nullptr || use_subtract;
     if (!config_->use_quantized_grad && only_smaller_leaf_needed) {
       hist_t* ptr_smaller_leaf_hist_data = smaller_leaf_histogram_array_[0].RawData() - kHistOffset;
-      if (histogram_engine_.ConstructHistogram(smaller_leaf_splits_->data_indices(),
+      if (histogram_engine_.ConstructHistogram(is_feature_used, smaller_leaf_splits_->data_indices(),
                                                smaller_leaf_splits_->num_data_in_leaf(),
                                                ptr_smaller_leaf_hist_data)) {
 #ifdef TIMETAG
