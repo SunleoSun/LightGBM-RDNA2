@@ -42,6 +42,10 @@ H128 one-step software prefetch is accepted. The kernel requests next-row index/
 
 Compile-time direct/indexed row specialization is accepted. It only replaces runtime pointer selection with template-specialized row access and does not group, reorder, or change arithmetic. Smoke, the complete feature-fraction matrix, and representative Optuna suite remain prediction-diff `0` and structurally exact. TIMETAG H64 improves to ~727 ms kernel / ~1.216 s ConstructHistograms per 100 trees; H128 stays effectively neutral near ~1136 ms / ~1.643 s.
 
+The H64 SuperTile all-active fast path is accepted. It branches once on the existing eight-feature canonical activity mask and, only for `0xff`, removes repeated tuple/group/mask guards while preserving the same row sequence, feature rotation, double LDS atomic sequence, reduction order, and mapped output. TIMETAG improves from ~750.8 to ~745.6 ms kernel and ~1.2558 to ~1.2442 s ConstructHistograms per 100 trees. Smoke 4/4, feature_fraction 8/8, and representative Optuna 10/10 all remain prediction-diff 0 and structurally exact; a 100-tree feature_fraction=1.0 H64 run measured ~26.86 ms/tree.
+
+Rejected strict-exact micro-probes after mapped output include `double2` final stores, contiguous-bin output thread remapping, raw-bin-0 atomic/store suppression, H64 bank shifts/hash mappings, and removing feature rotation. All preserved short correctness when tested but regressed attributed or wall-clock performance and were reverted.
+
 A constant-Hessian scalar kernel specialization was tested and rejected. It avoided the Hessian array H2D/load on constant-Hessian regression, but the specialized H128 kernel became slower enough that total training regressed; the experiment was fully reverted.
 
 Do not repeat rejected experiments without a new reason or a materially different ownership boundary. The preferred new boundary is a fork-specific `rdna2` learner that keeps Serial/OpenCL host semantics and specializes only the HIP histogram engine first.
