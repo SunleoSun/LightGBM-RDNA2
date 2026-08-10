@@ -43,20 +43,63 @@ __global__ void RDNA2HistogramKernel(
   const int feature_rotation = tid & (kFeaturesPerTuple - 1);
   const uint32_t* tuple_data = packed_features + static_cast<size_t>(tuple) * dataset_num_data;
 
-  for (data_size_t leaf_pos = static_cast<data_size_t>(tid); leaf_pos < leaf_num_data; leaf_pos += kHistogramThreads) {
-    const data_size_t row = data_indices == nullptr ? leaf_pos : data_indices[leaf_pos];
-    const uint32_t packed = tuple_data[row];
-    const hist_t grad = static_cast<hist_t>(gradients[row]);
-    const hist_t hess = static_cast<hist_t>(hessians[row]);
+  if constexpr (NUM_BINS == 128) {
+    data_size_t leaf_pos = static_cast<data_size_t>(tid);
+    if (leaf_pos < leaf_num_data) {
+      data_size_t row = data_indices == nullptr ? leaf_pos : data_indices[leaf_pos];
+      uint32_t packed = tuple_data[row];
+      hist_t grad = static_cast<hist_t>(gradients[row]);
+      hist_t hess = static_cast<hist_t>(hessians[row]);
+      while (true) {
+        const data_size_t next_leaf_pos = leaf_pos + kHistogramThreads;
+        const bool has_next = next_leaf_pos < leaf_num_data;
+        data_size_t next_row = row;
+        uint32_t next_packed = packed;
+        hist_t next_grad = grad;
+        hist_t next_hess = hess;
+        if (has_next) {
+          next_row = data_indices == nullptr ? next_leaf_pos : data_indices[next_leaf_pos];
+          next_packed = tuple_data[next_row];
+          next_grad = static_cast<hist_t>(gradients[next_row]);
+          next_hess = static_cast<hist_t>(hessians[next_row]);
+        }
 #pragma unroll
-    for (int slot = 0; slot < kFeaturesPerTuple; ++slot) {
-      const int feature = (slot + feature_rotation) & (kFeaturesPerTuple - 1);
-      const int group = group_base + feature;
-      if (group < num_groups && (active_mask & (1u << feature)) != 0) {
-        const uint32_t bin = (packed >> (feature * 8)) & 0xffu;
-        const int base = bank * kEntriesPerBank + ((feature * NUM_BINS + static_cast<int>(bin)) * 2);
-        atomicAdd(shared_hist + base, grad);
-        atomicAdd(shared_hist + base + 1, hess);
+        for (int slot = 0; slot < kFeaturesPerTuple; ++slot) {
+          const int feature = (slot + feature_rotation) & (kFeaturesPerTuple - 1);
+          const int group = group_base + feature;
+          if (group < num_groups && (active_mask & (1u << feature)) != 0) {
+            const uint32_t bin = (packed >> (feature * 8)) & 0xffu;
+            const int base = bank * kEntriesPerBank + ((feature * NUM_BINS + static_cast<int>(bin)) * 2);
+            atomicAdd(shared_hist + base, grad);
+            atomicAdd(shared_hist + base + 1, hess);
+          }
+        }
+        if (!has_next) {
+          break;
+        }
+        leaf_pos = next_leaf_pos;
+        row = next_row;
+        packed = next_packed;
+        grad = next_grad;
+        hess = next_hess;
+      }
+    }
+  } else {
+    for (data_size_t leaf_pos = static_cast<data_size_t>(tid); leaf_pos < leaf_num_data; leaf_pos += kHistogramThreads) {
+      const data_size_t row = data_indices == nullptr ? leaf_pos : data_indices[leaf_pos];
+      const uint32_t packed = tuple_data[row];
+      const hist_t grad = static_cast<hist_t>(gradients[row]);
+      const hist_t hess = static_cast<hist_t>(hessians[row]);
+#pragma unroll
+      for (int slot = 0; slot < kFeaturesPerTuple; ++slot) {
+        const int feature = (slot + feature_rotation) & (kFeaturesPerTuple - 1);
+        const int group = group_base + feature;
+        if (group < num_groups && (active_mask & (1u << feature)) != 0) {
+          const uint32_t bin = (packed >> (feature * 8)) & 0xffu;
+          const int base = bank * kEntriesPerBank + ((feature * NUM_BINS + static_cast<int>(bin)) * 2);
+          atomicAdd(shared_hist + base, grad);
+          atomicAdd(shared_hist + base + 1, hess);
+        }
       }
     }
   }
