@@ -10,7 +10,7 @@ namespace {
 constexpr int kHistogramThreads = 256;
 constexpr int kFeaturesPerTuple = 4;
 
-template <int NUM_BINS, int NUM_BANKS>
+template <int NUM_BINS, int NUM_BANKS, bool USE_INDICES>
 __global__ void RDNA2HistogramKernel(
     const uint32_t* packed_features,
     const score_t* gradients,
@@ -46,7 +46,7 @@ __global__ void RDNA2HistogramKernel(
   if constexpr (NUM_BINS == 128) {
     data_size_t leaf_pos = static_cast<data_size_t>(tid);
     if (leaf_pos < leaf_num_data) {
-      data_size_t row = data_indices == nullptr ? leaf_pos : data_indices[leaf_pos];
+      data_size_t row = USE_INDICES ? data_indices[leaf_pos] : leaf_pos;
       uint32_t packed = tuple_data[row];
       hist_t grad = static_cast<hist_t>(gradients[row]);
       hist_t hess = static_cast<hist_t>(hessians[row]);
@@ -58,7 +58,7 @@ __global__ void RDNA2HistogramKernel(
         hist_t next_grad = grad;
         hist_t next_hess = hess;
         if (has_next) {
-          next_row = data_indices == nullptr ? next_leaf_pos : data_indices[next_leaf_pos];
+          next_row = USE_INDICES ? data_indices[next_leaf_pos] : next_leaf_pos;
           next_packed = tuple_data[next_row];
           next_grad = static_cast<hist_t>(gradients[next_row]);
           next_hess = static_cast<hist_t>(hessians[next_row]);
@@ -86,7 +86,7 @@ __global__ void RDNA2HistogramKernel(
     }
   } else {
     for (data_size_t leaf_pos = static_cast<data_size_t>(tid); leaf_pos < leaf_num_data; leaf_pos += kHistogramThreads) {
-      const data_size_t row = data_indices == nullptr ? leaf_pos : data_indices[leaf_pos];
+      const data_size_t row = USE_INDICES ? data_indices[leaf_pos] : leaf_pos;
       const uint32_t packed = tuple_data[row];
       const hist_t grad = static_cast<hist_t>(gradients[row]);
       const hist_t hess = static_cast<hist_t>(hessians[row]);
@@ -131,7 +131,7 @@ __global__ void RDNA2HistogramKernel(
   }
 }
 
-template <int NUM_BINS, int NUM_TUPLES, int NUM_BANKS>
+template <int NUM_BINS, int NUM_TUPLES, int NUM_BANKS, bool USE_INDICES>
 __global__ void RDNA2HistogramSuperTileKernel(
     const uint32_t* packed_features,
     const score_t* gradients,
@@ -173,7 +173,7 @@ __global__ void RDNA2HistogramSuperTileKernel(
   const int feature_rotation = tid & (kFeaturesPerTuple - 1);
 
   for (data_size_t leaf_pos = static_cast<data_size_t>(tid); leaf_pos < leaf_num_data; leaf_pos += kHistogramThreads) {
-    const data_size_t row = data_indices == nullptr ? leaf_pos : data_indices[leaf_pos];
+    const data_size_t row = USE_INDICES ? data_indices[leaf_pos] : leaf_pos;
     const hist_t grad = static_cast<hist_t>(gradients[row]);
     const hist_t hess = static_cast<hist_t>(hessians[row]);
 #pragma unroll
@@ -317,23 +317,44 @@ bool RDNA2HistogramEngine::ConstructHistogram(
   const dim3 block(kHistogramThreads);
   constexpr int kH64SuperTileTuples = 2;
   constexpr data_size_t kH64SuperTileMinRows = 16384;
+  const bool use_indices = device_indices != nullptr;
   if (h64_eligible_ && num_data >= kH64SuperTileMinRows) {
     const int num_tiles = (static_cast<int>(num_feature4_) + kH64SuperTileTuples - 1) / kH64SuperTileTuples;
     const dim3 grid(static_cast<unsigned int>(num_tiles));
-    RDNA2HistogramSuperTileKernel<64, kH64SuperTileTuples, 4><<<grid, block, 0, stream()>>>(
-        reinterpret_cast<const uint32_t*>(packed_features()),
-        device_gradients(), device_hessians(), device_indices, group_bin_offsets(),
-        feature4_masks(), num_data_, num_data, static_cast<int>(num_feature4_),
-        num_groups, kernel_histogram);
+    if (use_indices) {
+      RDNA2HistogramSuperTileKernel<64, kH64SuperTileTuples, 4, true><<<grid, block, 0, stream()>>>(
+          reinterpret_cast<const uint32_t*>(packed_features()),
+          device_gradients(), device_hessians(), device_indices, group_bin_offsets(),
+          feature4_masks(), num_data_, num_data, static_cast<int>(num_feature4_),
+          num_groups, kernel_histogram);
+    } else {
+      RDNA2HistogramSuperTileKernel<64, kH64SuperTileTuples, 4, false><<<grid, block, 0, stream()>>>(
+          reinterpret_cast<const uint32_t*>(packed_features()),
+          device_gradients(), device_hessians(), device_indices, group_bin_offsets(),
+          feature4_masks(), num_data_, num_data, static_cast<int>(num_feature4_),
+          num_groups, kernel_histogram);
+    }
   } else {
     const dim3 grid(static_cast<unsigned int>(num_feature4_));
     if (h64_eligible_) {
-      RDNA2HistogramKernel<64, 4><<<grid, block, 0, stream()>>>(
+      if (use_indices) {
+        RDNA2HistogramKernel<64, 4, true><<<grid, block, 0, stream()>>>(
+            reinterpret_cast<const uint32_t*>(packed_features()),
+            device_gradients(), device_hessians(), device_indices, group_bin_offsets(),
+            feature4_masks(), num_data_, num_data, num_groups, kernel_histogram);
+      } else {
+        RDNA2HistogramKernel<64, 4, false><<<grid, block, 0, stream()>>>(
+            reinterpret_cast<const uint32_t*>(packed_features()),
+            device_gradients(), device_hessians(), device_indices, group_bin_offsets(),
+            feature4_masks(), num_data_, num_data, num_groups, kernel_histogram);
+      }
+    } else if (use_indices) {
+      RDNA2HistogramKernel<128, 4, true><<<grid, block, 0, stream()>>>(
           reinterpret_cast<const uint32_t*>(packed_features()),
           device_gradients(), device_hessians(), device_indices, group_bin_offsets(),
           feature4_masks(), num_data_, num_data, num_groups, kernel_histogram);
     } else {
-      RDNA2HistogramKernel<128, 4><<<grid, block, 0, stream()>>>(
+      RDNA2HistogramKernel<128, 4, false><<<grid, block, 0, stream()>>>(
           reinterpret_cast<const uint32_t*>(packed_features()),
           device_gradients(), device_hessians(), device_indices, group_bin_offsets(),
           feature4_masks(), num_data_, num_data, num_groups, kernel_histogram);

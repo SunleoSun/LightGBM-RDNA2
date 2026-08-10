@@ -40,6 +40,8 @@ Mapped canonical histogram output is accepted. Host-registering each exact Seria
 
 H128 one-step software prefetch is accepted. The kernel requests next-row index/packed/gradient/Hessian values before the current row's atomics while retaining the same per-thread feature sequence and double accumulation. Smoke, feature_fraction, and all representative Optuna profiles stayed prediction-diff `0` and structurally exact. TIMETAG improved H128 kernel attribution from ~1162 to ~1136 ms/100 trees and ConstructHistograms from ~1.678 to ~1.644 s. Applying the same prefetch to H64 did not show a stable gain and was disabled there.
 
+Compile-time direct/indexed row specialization is accepted. It only replaces runtime pointer selection with template-specialized row access and does not group, reorder, or change arithmetic. Smoke, the complete feature-fraction matrix, and representative Optuna suite remain prediction-diff `0` and structurally exact. TIMETAG H64 improves to ~727 ms kernel / ~1.216 s ConstructHistograms per 100 trees; H128 stays effectively neutral near ~1136 ms / ~1.643 s.
+
 A constant-Hessian scalar kernel specialization was tested and rejected. It avoided the Hessian array H2D/load on constant-Hessian regression, but the specialized H128 kernel became slower enough that total training regressed; the experiment was fully reverted.
 
 Do not repeat rejected experiments without a new reason or a materially different ownership boundary. The preferred new boundary is a fork-specific `rdna2` learner that keeps Serial/OpenCL host semantics and specializes only the HIP histogram engine first.
