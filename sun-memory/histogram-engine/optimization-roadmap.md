@@ -24,13 +24,13 @@ The histogram pipeline now owns one persistent HIP stream. Gradient/Hessian and 
 
 This preserves bit-for-bit CPU correctness. Representative 100-tree measurements after the change put H64 around `30.7 ms/tree`, roughly a 3% improvement over the first exact H64 reference. H128 stayed approximately neutral around `46 ms/tree` versus the earlier `45.5 ms/tree` observation, so transfer cleanup is not the main H128 bottleneck. A two-LDS-bank H128 geometry was also neutral and was reverted to four banks.
 
-## Immediate Phase 3 - Feature SuperTile
+## Phase 3 - adaptive Feature SuperTile
 
-The largest remaining architectural waste is repeated row-state loading. With about 3000 features the current four-feature kernel creates roughly 750 Feature4 workgroups, and each tuple independently reloads the same row index, gradient, and Hessian. The next task is SuperTile reuse while retaining the current canonical packed dataset and double-precision accumulation semantics.
+The H64 SuperTile experiment is now implemented and accepted only as an adaptive large-leaf path. The best tested shape is eight features per 256-thread workgroup (two adjacent Feature4 tuples) with four double-precision LDS banks. Wider H64 tiles were slower: 12 features was about `31.6 ms/tree`, 16 features about `31.4`, and eight features with eight banks about `31.3`. The eight-feature/four-bank path was best, but only for large leaves. A leaf-size threshold of 16384 rows gave the best production result around `30.15 ms/tree`; 8192 was about `30.67` and 24576 regressed to about `31.84`. Smaller leaves therefore remain on the original four-feature kernel.
 
-For H64, start with 16 features per workgroup (four adjacent Feature4 tuples), 256 threads, and four double LDS banks. Base shared histogram storage is `16 * 64 * 2 * 8 * 4 = 64 KiB`, permitting two such workgroups per 128 KiB LDS CU in the LDS-only limit. The grid drops from about 750 tuple workgroups to about 188 SuperTiles, while each row loads gradient/Hessian once for sixteen features instead of four. Validate exact CPU structure/predictions before tuning feature rotation, prefetch, or temporal accumulation.
+The first H128 eight-feature SuperTile was exact but slower at about `47.6 ms/tree`, so H128 remains on the four-feature reference kernel. This confirms that row-state reuse must be balanced against LDS occupancy/atomic pressure rather than applied uniformly.
 
-For H128, test an independent eight-feature SuperTile first. `8 * 128 * 2 * 8 * 4` is also 64 KiB. Do not automatically use the H64 tile width; measured LDS/VGPR occupancy and atomic pressure decide the final geometry.
+The immediate next task is bottleneck attribution across the remaining host/device pipeline before further kernel complexity. In particular measure time spent in H64/H128 kernel execution, histogram D2H plus host staging copy, `FindBestSplitsFromHistograms`, Serial subtraction/bookkeeping, and fallback cases that construct both children independently. OpenCL also delegates split finding to `SerialTreeLearner`, so the remaining OpenCL gap cannot be assumed to come from CPU best-split alone.
 
 ## Later phases
 

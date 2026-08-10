@@ -22,4 +22,6 @@ Rejected or neutral experiments include naive concurrent smaller/larger best-spl
 
 A persistent HIP stream plus ordered async H2D/memset/kernel/D2H and pinned host histogram staging is accepted. It preserves prediction diff `0` and exact CPU structure across smoke and the representative Optuna envelope. H64 improved modestly to roughly `30.7 ms/tree` in a 100-tree production run; H128 was approximately neutral.
 
+Adaptive H64 SuperTile is accepted for leaves with at least 16384 rows. Eight features / four LDS banks was the best tested geometry and reached about `30.15 ms/tree`; thresholds 8192 and 24576 were slower. H64 12/16-feature tiles and eight banks were slower. H128 eight-feature SuperTile was exact but slower (~`47.6 ms/tree`) and remains disabled.
+
 Do not repeat rejected experiments without a new reason or a materially different ownership boundary. The preferred new boundary is a fork-specific `rdna2` learner that keeps Serial/OpenCL host semantics and specializes only the HIP histogram engine first.
