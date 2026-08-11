@@ -59,6 +59,18 @@ def check(lib: C.CDLL, rc: int, where: str) -> None:
         raise RuntimeError(f"{where}: {text}")
 
 
+def array_layout(array: np.ndarray) -> dict:
+    return {
+        "dtype": str(array.dtype),
+        "shape": [int(v) for v in array.shape],
+        "strides": [int(v) for v in array.strides],
+        "c_contiguous": bool(array.flags.c_contiguous),
+        "f_contiguous": bool(array.flags.f_contiguous),
+        "owns_data": bool(array.flags.owndata),
+        "nbytes": int(array.nbytes),
+    }
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--dll", required=True)
@@ -68,20 +80,50 @@ def main() -> int:
     p.add_argument("--max-bin", type=int, required=True)
     p.add_argument("--num-threads", type=int, default=32)
     p.add_argument("--bin-construct-sample-cnt", type=int, default=200000)
+    p.add_argument("--train-start", type=int, required=True)
+    p.add_argument("--train-end", type=int, required=True)
+    p.add_argument("--split-extraction", choices=["pipeline_fancy", "contiguous_slice"], required=True)
     args = p.parse_args()
 
     wall0 = time.perf_counter()
     t0 = time.perf_counter()
     payload = np.load(args.input_npz)
-    x_source = payload["X"]
-    y_source = payload["y"]
+    x_loaded = payload["X"]
+    y_loaded = payload["y"]
     input_load_seconds = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    x = np.ascontiguousarray(x_source, dtype=np.float32)
-    y = np.ascontiguousarray(y_source, dtype=np.float32)
-    input_conversion_seconds = time.perf_counter() - t0
+    phase_x = np.ascontiguousarray(x_loaded, dtype=np.float32)
+    phase_y = np.ascontiguousarray(y_loaded, dtype=np.float32)
+    phase_input_conversion_seconds = time.perf_counter() - t0
+    phase_layout = array_layout(phase_x)
     baseline_ws, baseline_peak = memory_counters()
+
+    if not (0 <= args.train_start < args.train_end <= phase_x.shape[0]):
+        raise ValueError("invalid train range")
+
+    t0 = time.perf_counter()
+    split_index_bytes = 0
+    if args.split_extraction == "pipeline_fancy":
+        train_idx = np.arange(args.train_start, args.train_end, dtype=np.int64)
+        split_index_bytes = int(train_idx.nbytes)
+        x_split = phase_x[train_idx]
+        y_split = phase_y[train_idx]
+    else:
+        train_slice = slice(args.train_start, args.train_end)
+        x_split = phase_x[train_slice]
+        y_split = phase_y[train_slice]
+    split_materialization_seconds = time.perf_counter() - t0
+    post_split_ws, _ = memory_counters()
+    split_layout = array_layout(x_split)
+    split_shares_phase_memory = bool(np.shares_memory(x_split, phase_x))
+
+    t0 = time.perf_counter()
+    x = np.ascontiguousarray(x_split, dtype=np.float32)
+    y = np.ascontiguousarray(y_split, dtype=np.float32)
+    model_input_conversion_seconds = time.perf_counter() - t0
+    model_layout = array_layout(x)
+    model_shares_phase_memory = bool(np.shares_memory(x, phase_x))
 
     lib = C.CDLL(str(Path(args.dll).resolve()))
     bind(lib)
@@ -122,22 +164,35 @@ def main() -> int:
 
     result = {
         "input_load_seconds": input_load_seconds,
-        "input_conversion_seconds": input_conversion_seconds,
+        "phase_input_conversion_seconds": phase_input_conversion_seconds,
+        "split_materialization_seconds": split_materialization_seconds,
+        "model_input_conversion_seconds": model_input_conversion_seconds,
         "dataset_create_seconds": dataset_create_seconds,
         "set_label_seconds": set_label_seconds,
         "save_binary_seconds": save_binary_seconds,
-        "pipeline_seconds": input_conversion_seconds + dataset_create_seconds + set_label_seconds,
+        "pipeline_seconds": split_materialization_seconds + model_input_conversion_seconds + dataset_create_seconds + set_label_seconds,
         "worker_wall_seconds": time.perf_counter() - wall0,
         "baseline_working_set_mib": baseline_ws / (1024.0 * 1024.0),
+        "post_split_working_set_mib": post_split_ws / (1024.0 * 1024.0),
+        "split_working_set_delta_mib": max(0, post_split_ws - baseline_ws) / (1024.0 * 1024.0),
         "working_set_mib": current_ws / (1024.0 * 1024.0),
         "peak_working_set_mib": peak_ws / (1024.0 * 1024.0),
         "peak_delta_mib": max(0, peak_ws - baseline_ws) / (1024.0 * 1024.0),
         "baseline_process_peak_mib": baseline_peak / (1024.0 * 1024.0),
+        "phase_layout": phase_layout,
+        "split_layout": split_layout,
+        "model_layout": model_layout,
+        "split_shares_phase_memory": split_shares_phase_memory,
+        "model_shares_phase_memory": model_shares_phase_memory,
+        "split_index_bytes": split_index_bytes,
+        "train_start": args.train_start,
+        "train_end": args.train_end,
         "rows": int(x.shape[0]),
         "features": int(x.shape[1]),
         "max_bin": args.max_bin,
         "num_threads": args.num_threads,
         "bin_construct_sample_cnt": args.bin_construct_sample_cnt,
+        "split_extraction": args.split_extraction,
         "binary_bytes": binary_out.stat().st_size,
     }
     Path(args.result_out).write_text(json.dumps(result, indent=2), encoding="utf-8")
