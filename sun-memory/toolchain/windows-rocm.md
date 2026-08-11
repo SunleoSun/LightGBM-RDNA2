@@ -4,7 +4,7 @@ description: Native Windows HIP toolchain, runtime limitations, and external bui
 
 # Windows ROCm toolchain
 
-The target environment is Windows 11, AMD Radeon RX 6800 XT / Navi21 / gfx1030 with native wave32, AMD ROCm/HIP SDK 6.2, Visual Studio 2022 with MSVC 14.44, CMake 3.31.6, and Ninja 1.12.1. Use the VS2022 environment. A newer VS18 Insiders toolchain was incompatible with the bundled HIP clang 19 path.
+The target environment is Windows 11, AMD Radeon RX 6800 XT / Navi21 / gfx1030 with native wave32, AMD Ryzen 9 5950X / Zen 3 host CPU, AMD ROCm/HIP SDK 6.2, Visual Studio 2022 with MSVC 14.44, CMake 3.31.6, and Ninja 1.12.1. Use the VS2022 environment. A newer VS18 Insiders toolchain was incompatible with the bundled HIP clang 19 path. The fork's ROCm benchmark/production build specializes C/C++ host translation units with Clang `-march=znver3 -mtune=znver3`; the pristine upstream LightGBM 4.7 CPU oracle intentionally remains a separate generic MSVC build so fork-side CPU tuning cannot contaminate correctness comparisons.
 
 Use native Windows HIP rather than WSL. WSL could enumerate gfx1030 and allocate memory, but the execution/completion path stalled on the first host-to-device copy. Native Windows HIP smoke testing succeeded through device discovery, allocation, H2D, kernel launch, D2H, and result validation.
 

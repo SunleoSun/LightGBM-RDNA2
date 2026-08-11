@@ -78,7 +78,10 @@ $clang = ($RocmPath -replace '\\','/') + '/bin/clang.exe'
 $clangxx = ($RocmPath -replace '\\','/') + '/bin/clang++.exe'
 $rocmCmake = $RocmPath -replace '\\','/'
 $rocmOut = Join-Path $RocmBuild 'out'
-$rocmCommand = "call `"$VcVars`" && set `"PATH=$RocmPath\bin;%PATH%`" && set `"HIP_PATH=$RocmPath`" && set `"HIP_PLATFORM=amd`" && cmake -S `"$Repo`" -B `"$RocmBuild`" -G Ninja -DUSE_ROCM=ON -DUSE_GPU=OFF -DUSE_CUDA=OFF -DBUILD_CLI=ON -DBUILD_STATIC_LIB=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=`"$clang`" -DCMAKE_CXX_COMPILER=`"$clangxx`" -DCMAKE_HIP_COMPILER=`"$clangxx`" -DCMAKE_HIP_COMPILER_ROCM_ROOT=`"$rocmCmake`" -DCMAKE_HIP_ARCHITECTURES=gfx1030 -DCMAKE_PREFIX_PATH=`"$rocmCmake`" -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=`"$rocmOut`" -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=`"$rocmOut`" -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY=`"$rocmOut`" && cmake --build `"$RocmBuild`" -j 8"
+# This fork's production RDNA2 target is the user's Ryzen 9 5950X (Zen 3).
+# Keep the pristine upstream CPU oracle generic and isolated; specialize only our ROCm host code.
+$rocmHostCpuFlags = '-O3 -march=znver3 -mtune=znver3'
+$rocmCommand = "call `"$VcVars`" && set `"PATH=$RocmPath\bin;%PATH%`" && set `"HIP_PATH=$RocmPath`" && set `"HIP_PLATFORM=amd`" && cmake -S `"$Repo`" -B `"$RocmBuild`" -G Ninja -DUSE_ROCM=ON -DUSE_GPU=OFF -DUSE_CUDA=OFF -DBUILD_CLI=ON -DBUILD_STATIC_LIB=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=`"$clang`" -DCMAKE_CXX_COMPILER=`"$clangxx`" -DCMAKE_HIP_COMPILER=`"$clangxx`" -DCMAKE_HIP_COMPILER_ROCM_ROOT=`"$rocmCmake`" -DCMAKE_HIP_ARCHITECTURES=gfx1030 -DCMAKE_PREFIX_PATH=`"$rocmCmake`" -DCMAKE_C_FLAGS_RELEASE=`"$rocmHostCpuFlags`" -DCMAKE_CXX_FLAGS_RELEASE=`"$rocmHostCpuFlags`" -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=`"$rocmOut`" -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=`"$rocmOut`" -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY=`"$rocmOut`" && cmake --build `"$RocmBuild`" -j 8"
 Invoke-CmdChecked $rocmCommand
 $rocmDll = Join-Path $rocmOut '_lightgbm.dll'
 $rocmExe = Join-Path $rocmOut 'lightgbm.exe'
