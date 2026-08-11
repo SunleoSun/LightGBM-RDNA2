@@ -131,11 +131,15 @@ void LaunchRDNA2BestSplitKernel(const RDNA2BestSplitEngine::FeatureMeta* feature
                                  RDNA2BestSplitEngine::DeviceSplit* results,
                                  RDNA2BestSplitEngine::DeviceSplit* best_result,
                                  RDNA2BestSplitEngine::DeviceSplit* top_results, cudaStream_t stream);
-void LaunchRDNA2BestSplitGatherKernel(
-    const RDNA2BestSplitEngine::DeviceSplit* top_results, int top_k,
-    const hist_t* histogram, const uint64_t* hist_offsets,
-    const RDNA2BestSplitEngine::FeatureMeta* feature_meta, hist_t* candidate_histograms,
-    cudaStream_t stream);
+void LaunchRDNA2BestSplitPairKernelAndGather(
+    const RDNA2BestSplitEngine::FeatureMeta* feature_meta, const uint64_t* hist_offsets,
+    const int8_t* used_features, int num_features,
+    const hist_t* first_histogram, double first_sum_gradients, double first_sum_hessians,
+    data_size_t first_num_data, const hist_t* second_histogram, double second_sum_gradients,
+    double second_sum_hessians, data_size_t second_num_data, double lambda_l1, double lambda_l2,
+    data_size_t min_data_in_leaf, double min_sum_hessian_in_leaf, double min_gain_to_split, int top_k,
+    RDNA2BestSplitEngine::DeviceSplit* results, RDNA2BestSplitEngine::DeviceSplit* top_results,
+    hist_t* candidate_histograms, cudaStream_t stream);
 
 }  // namespace LightGBM
 

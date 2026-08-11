@@ -71,7 +71,7 @@ void RDNA2BestSplitEngine::Init(const Dataset* train_data, int gpu_device_id) {
   used_features_initialized_ = false;
   hist_offsets_.Resize(static_cast<size_t>(num_features_));
   used_features_.Resize(static_cast<size_t>(num_features_));
-  results_.Resize(static_cast<size_t>(num_features_));
+  results_.Resize(static_cast<size_t>(num_features_) * 2);
   histogram_.Resize(num_total_bins_ * 2);
   best_result_.Resize(1);
   top_results_.Resize(8);
@@ -170,25 +170,13 @@ bool RDNA2BestSplitEngine::FindBestDeviceExactPair(
 #ifdef TIMETAG
   const auto kernel_start = std::chrono::steady_clock::now();
 #endif
-  LaunchRDNA2BestSplitKernel(feature_meta_.RawDataReadOnly(), hist_offsets_.RawDataReadOnly(),
-                             used_features_.RawDataReadOnly(), num_features_, first_device_histogram,
-                             first_sum_gradients, first_sum_hessians, first_num_data, first_parent_output,
-                             config->lambda_l1, config->lambda_l2, config->min_data_in_leaf,
-                             config->min_sum_hessian_in_leaf, config->min_gain_to_split, kExactTopK,
-                             results_.RawData(), best_result_.RawData(), top_results_.RawData(), stream_);
-  LaunchRDNA2BestSplitGatherKernel(
-      top_results_.RawDataReadOnly(), kExactTopK, first_device_histogram, hist_offsets_.RawDataReadOnly(),
-      feature_meta_.RawDataReadOnly(), candidate_histograms_.RawData(), stream_);
-  LaunchRDNA2BestSplitKernel(feature_meta_.RawDataReadOnly(), hist_offsets_.RawDataReadOnly(),
-                             used_features_.RawDataReadOnly(), num_features_, second_device_histogram,
-                             second_sum_gradients, second_sum_hessians, second_num_data, second_parent_output,
-                             config->lambda_l1, config->lambda_l2, config->min_data_in_leaf,
-                             config->min_sum_hessian_in_leaf, config->min_gain_to_split, kExactTopK,
-                             results_.RawData(), best_result_.RawData(), top_results_.RawData() + kExactTopK, stream_);
-  LaunchRDNA2BestSplitGatherKernel(
-      top_results_.RawDataReadOnly() + kExactTopK, kExactTopK, second_device_histogram,
-      hist_offsets_.RawDataReadOnly(), feature_meta_.RawDataReadOnly(),
-      candidate_histograms_.RawData() + kExactTopK * kCandidateHistogramValues, stream_);
+  LaunchRDNA2BestSplitPairKernelAndGather(
+      feature_meta_.RawDataReadOnly(), hist_offsets_.RawDataReadOnly(), used_features_.RawDataReadOnly(),
+      num_features_, first_device_histogram, first_sum_gradients, first_sum_hessians, first_num_data,
+      second_device_histogram, second_sum_gradients, second_sum_hessians, second_num_data,
+      config->lambda_l1, config->lambda_l2, config->min_data_in_leaf, config->min_sum_hessian_in_leaf,
+      config->min_gain_to_split, kExactTopK, results_.RawData(), top_results_.RawData(),
+      candidate_histograms_.RawData(), stream_);
   CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(host_top_results_.data(), top_results_.RawDataReadOnly(),
                                        2 * kExactTopK * sizeof(DeviceSplit),
                                        cudaMemcpyDeviceToHost, stream_));

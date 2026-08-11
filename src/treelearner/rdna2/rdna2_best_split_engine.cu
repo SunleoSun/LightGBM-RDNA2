@@ -26,22 +26,28 @@ __device__ inline double LeafOutput(double grad, double hess, double l1, double 
   return -reg_grad / (hess + l2);
 }
 
-__global__ void RDNA2BestSplitKernel(const RDNA2BestSplitEngine::FeatureMeta* feature_meta,
-                                      const uint64_t* hist_offsets, const int8_t* used_features,
-                                      int num_features, const hist_t* histogram,
-                                      double raw_sum_gradients, double raw_sum_hessians, data_size_t num_data,
-                                      double parent_output, double lambda_l1, double lambda_l2,
-                                      data_size_t min_data_in_leaf, double min_sum_hessian_in_leaf,
-                                      double min_gain_to_split,
-                                      RDNA2BestSplitEngine::DeviceSplit* results) {
-  (void)parent_output;
+__global__ void RDNA2BestSplitKernel(
+    const RDNA2BestSplitEngine::FeatureMeta* feature_meta, const uint64_t* hist_offsets,
+    const int8_t* used_features, int num_features,
+    const hist_t* first_histogram, const hist_t* second_histogram,
+    double first_sum_gradients, double first_sum_hessians, data_size_t first_num_data,
+    double second_sum_gradients, double second_sum_hessians, data_size_t second_num_data,
+    double lambda_l1, double lambda_l2, data_size_t min_data_in_leaf,
+    double min_sum_hessian_in_leaf, double min_gain_to_split, int leaf_count,
+    RDNA2BestSplitEngine::DeviceSplit* results) {
   constexpr int kWavesPerBlock = kBestSplitThreads / kWaveSize;
   const int wave = static_cast<int>(threadIdx.x) / kWaveSize;
   const int lane = static_cast<int>(threadIdx.x) & (kWaveSize - 1);
   const int feature = static_cast<int>(blockIdx.x) * kWavesPerBlock + wave;
-  if (feature >= num_features) {
+  const int leaf = static_cast<int>(blockIdx.y);
+  if (feature >= num_features || leaf >= leaf_count) {
     return;
   }
+  const hist_t* histogram = leaf == 0 ? first_histogram : second_histogram;
+  const double raw_sum_gradients = leaf == 0 ? first_sum_gradients : second_sum_gradients;
+  const double raw_sum_hessians = leaf == 0 ? first_sum_hessians : second_sum_hessians;
+  const data_size_t num_data = leaf == 0 ? first_num_data : second_num_data;
+  results += static_cast<size_t>(leaf) * static_cast<size_t>(num_features);
 
   RDNA2BestSplitEngine::DeviceSplit out{};
   out.feature = feature_meta[feature].real_feature;
@@ -222,9 +228,24 @@ __global__ void RDNA2BestSplitReduceKernel(const RDNA2BestSplitEngine::DeviceSpl
 
 constexpr int kMaxTopK = 8;
 
-__global__ void RDNA2BestSplitTopKKernel(const RDNA2BestSplitEngine::DeviceSplit* results,
-                                          int num_features, int top_k,
-                                          RDNA2BestSplitEngine::DeviceSplit* top_results) {
+__global__ void RDNA2BestSplitTopKKernel(
+    const RDNA2BestSplitEngine::DeviceSplit* all_results, int num_features, int top_k,
+    RDNA2BestSplitEngine::DeviceSplit* all_top_results, const hist_t* first_histogram,
+    const hist_t* second_histogram, const uint64_t* hist_offsets,
+    const RDNA2BestSplitEngine::FeatureMeta* feature_meta, hist_t* all_candidate_histograms,
+    int leaf_count) {
+  const int leaf = static_cast<int>(blockIdx.x);
+  if (leaf >= leaf_count) {
+    return;
+  }
+  const RDNA2BestSplitEngine::DeviceSplit* results =
+      all_results + static_cast<size_t>(leaf) * static_cast<size_t>(num_features);
+  RDNA2BestSplitEngine::DeviceSplit* top_results =
+      all_top_results + static_cast<size_t>(leaf) * static_cast<size_t>(top_k);
+  const hist_t* histogram = leaf == 0 ? first_histogram : second_histogram;
+  hist_t* candidate_histograms = all_candidate_histograms == nullptr ? nullptr :
+      all_candidate_histograms + static_cast<size_t>(leaf) * static_cast<size_t>(top_k) *
+          RDNA2BestSplitEngine::kCandidateHistogramValues;
   __shared__ RDNA2BestSplitEngine::DeviceSplit shared[kBestSplitThreads];
   __shared__ int selected_features[kMaxTopK];
   const int tid = static_cast<int>(threadIdx.x);
@@ -238,7 +259,7 @@ __global__ void RDNA2BestSplitTopKKernel(const RDNA2BestSplitEngine::DeviceSplit
       bool already_selected = false;
 #pragma unroll
       for (int selected = 0; selected < kMaxTopK; ++selected) {
-        if (selected < rank && candidate.feature == selected_features[selected]) {
+        if (selected < rank && candidate.inner_feature == selected_features[selected]) {
           already_selected = true;
         }
       }
@@ -256,50 +277,29 @@ __global__ void RDNA2BestSplitTopKKernel(const RDNA2BestSplitEngine::DeviceSplit
     }
     if (tid == 0) {
       top_results[rank] = shared[0];
-      selected_features[rank] = shared[0].valid ? shared[0].feature : -1;
+      selected_features[rank] = shared[0].valid ? shared[0].inner_feature : -1;
     }
     __syncthreads();
   }
-}
-
-__global__ void RDNA2BestSplitGatherKernel(
-    const RDNA2BestSplitEngine::DeviceSplit* top_results, int top_k,
-    const hist_t* histogram, const uint64_t* hist_offsets,
-    const RDNA2BestSplitEngine::FeatureMeta* feature_meta, hist_t* candidate_histograms) {
-  const int candidate_index = static_cast<int>(blockIdx.x);
-  if (candidate_index >= top_k) {
+  if (candidate_histograms == nullptr || histogram == nullptr) {
     return;
   }
-  const auto candidate = top_results[candidate_index];
-  if (!candidate.valid || candidate.inner_feature < 0) {
-    return;
-  }
-  const int inner_feature = candidate.inner_feature;
-  const auto meta = feature_meta[inner_feature];
-  const size_t histogram_values = static_cast<size_t>(meta.num_bin - meta.offset) * 2;
-  const hist_t* source = histogram + hist_offsets[inner_feature];
-  hist_t* destination = candidate_histograms +
-      static_cast<size_t>(candidate_index) * RDNA2BestSplitEngine::kCandidateHistogramValues;
-  for (size_t index = static_cast<size_t>(threadIdx.x); index < histogram_values; index += blockDim.x) {
-    destination[index] = source[index];
+  for (int rank = 0; rank < top_k; ++rank) {
+    const int inner_feature = selected_features[rank];
+    if (inner_feature < 0) {
+      continue;
+    }
+    const auto meta = feature_meta[inner_feature];
+    const size_t histogram_values = static_cast<size_t>(meta.num_bin - meta.offset) * 2;
+    if (static_cast<size_t>(tid) < histogram_values) {
+      candidate_histograms[static_cast<size_t>(rank) * RDNA2BestSplitEngine::kCandidateHistogramValues +
+                           static_cast<size_t>(tid)] =
+          histogram[hist_offsets[inner_feature] + static_cast<size_t>(tid)];
+    }
   }
 }
 
 }  // namespace
-
-void LaunchRDNA2BestSplitGatherKernel(
-    const RDNA2BestSplitEngine::DeviceSplit* top_results, int top_k,
-    const hist_t* histogram, const uint64_t* hist_offsets,
-    const RDNA2BestSplitEngine::FeatureMeta* feature_meta, hist_t* candidate_histograms,
-    cudaStream_t stream) {
-  if (top_k <= 0) {
-    return;
-  }
-  constexpr int kGatherThreads = 256;
-  RDNA2BestSplitGatherKernel<<<top_k, kGatherThreads, 0, stream>>>(
-      top_results, top_k, histogram, hist_offsets, feature_meta, candidate_histograms);
-  CUDASUCCESS_OR_FATAL(cudaGetLastError());
-}
 
 void LaunchRDNA2BestSplitKernel(const RDNA2BestSplitEngine::FeatureMeta* feature_meta,
                                  const uint64_t* hist_offsets, const int8_t* used_features,
@@ -311,19 +311,46 @@ void LaunchRDNA2BestSplitKernel(const RDNA2BestSplitEngine::FeatureMeta* feature
                                  RDNA2BestSplitEngine::DeviceSplit* results,
                                  RDNA2BestSplitEngine::DeviceSplit* best_result,
                                  RDNA2BestSplitEngine::DeviceSplit* top_results, cudaStream_t stream) {
+  (void)parent_output;
   const dim3 block(kBestSplitThreads);
   constexpr int kWavesPerBlock = kBestSplitThreads / kWaveSize;
-  const dim3 grid(static_cast<unsigned int>((num_features + kWavesPerBlock - 1) / kWavesPerBlock));
+  const dim3 grid(static_cast<unsigned int>((num_features + kWavesPerBlock - 1) / kWavesPerBlock), 1);
   RDNA2BestSplitKernel<<<grid, block, 0, stream>>>(
-      feature_meta, hist_offsets, used_features, num_features, histogram, sum_gradients, sum_hessians,
-      num_data, parent_output, lambda_l1, lambda_l2, min_data_in_leaf, min_sum_hessian_in_leaf,
-      min_gain_to_split, results);
+      feature_meta, hist_offsets, used_features, num_features, histogram, nullptr,
+      sum_gradients, sum_hessians, num_data, 0.0, 0.0, 0,
+      lambda_l1, lambda_l2, min_data_in_leaf, min_sum_hessian_in_leaf, min_gain_to_split, 1, results);
   CUDASUCCESS_OR_FATAL(cudaGetLastError());
   if (top_k <= 1) {
     RDNA2BestSplitReduceKernel<<<1, block, 0, stream>>>(results, num_features, best_result);
   } else {
-    RDNA2BestSplitTopKKernel<<<1, block, 0, stream>>>(results, num_features, top_k, top_results);
+    RDNA2BestSplitTopKKernel<<<1, block, 0, stream>>>(
+        results, num_features, top_k, top_results, histogram, nullptr, hist_offsets, feature_meta, nullptr, 1);
   }
   CUDASUCCESS_OR_FATAL(cudaGetLastError());
 }
+
+void LaunchRDNA2BestSplitPairKernelAndGather(
+    const RDNA2BestSplitEngine::FeatureMeta* feature_meta, const uint64_t* hist_offsets,
+    const int8_t* used_features, int num_features,
+    const hist_t* first_histogram, double first_sum_gradients, double first_sum_hessians,
+    data_size_t first_num_data, const hist_t* second_histogram, double second_sum_gradients,
+    double second_sum_hessians, data_size_t second_num_data, double lambda_l1, double lambda_l2,
+    data_size_t min_data_in_leaf, double min_sum_hessian_in_leaf, double min_gain_to_split, int top_k,
+    RDNA2BestSplitEngine::DeviceSplit* results, RDNA2BestSplitEngine::DeviceSplit* top_results,
+    hist_t* candidate_histograms, cudaStream_t stream) {
+  const dim3 block(kBestSplitThreads);
+  constexpr int kWavesPerBlock = kBestSplitThreads / kWaveSize;
+  const dim3 grid(static_cast<unsigned int>((num_features + kWavesPerBlock - 1) / kWavesPerBlock), 2);
+  RDNA2BestSplitKernel<<<grid, block, 0, stream>>>(
+      feature_meta, hist_offsets, used_features, num_features, first_histogram, second_histogram,
+      first_sum_gradients, first_sum_hessians, first_num_data,
+      second_sum_gradients, second_sum_hessians, second_num_data,
+      lambda_l1, lambda_l2, min_data_in_leaf, min_sum_hessian_in_leaf, min_gain_to_split, 2, results);
+  CUDASUCCESS_OR_FATAL(cudaGetLastError());
+  RDNA2BestSplitTopKKernel<<<2, block, 0, stream>>>(
+      results, num_features, top_k, top_results, first_histogram, second_histogram, hist_offsets,
+      feature_meta, candidate_histograms, 2);
+  CUDASUCCESS_OR_FATAL(cudaGetLastError());
+}
+
 }  // namespace LightGBM
