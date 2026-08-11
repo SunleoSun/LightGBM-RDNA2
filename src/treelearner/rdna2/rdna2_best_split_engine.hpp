@@ -50,6 +50,13 @@ class RDNA2BestSplitEngine {
   void Init(const Dataset* train_data, int gpu_device_id);
 
   bool eligible() const { return eligible_; }
+  bool PreparePairCandidates(const Config* config, FeatureHistogram* first_histogram_array,
+                             const hist_t* first_device_histogram, double first_sum_gradients,
+                             double first_sum_hessians, data_size_t first_num_data,
+                             FeatureHistogram* second_histogram_array, const hist_t* second_device_histogram,
+                             double second_sum_gradients, double second_sum_hessians, data_size_t second_num_data,
+                             const std::vector<int8_t>& is_feature_used,
+                             const std::vector<int8_t>& node_used_features, cudaStream_t producer_stream);
 
   bool ShadowFind(const Config* config, FeatureHistogram* histogram_array,
                   const std::vector<int8_t>& is_feature_used,
@@ -100,6 +107,9 @@ class RDNA2BestSplitEngine {
   hist_t* host_candidate_histograms_ = nullptr;
   bool hist_offsets_initialized_ = false;
   bool used_features_initialized_ = false;
+  bool prepared_pair_valid_ = false;
+  const hist_t* prepared_first_histogram_ = nullptr;
+  const hist_t* prepared_second_histogram_ = nullptr;
   DeviceSplit host_best_result_{};
   CUDAVector<FeatureMeta> feature_meta_;
   CUDAVector<uint64_t> hist_offsets_;
@@ -132,6 +142,19 @@ void LaunchRDNA2BestSplitKernel(const RDNA2BestSplitEngine::FeatureMeta* feature
                                  RDNA2BestSplitEngine::DeviceSplit* results,
                                  RDNA2BestSplitEngine::DeviceSplit* best_result,
                                  RDNA2BestSplitEngine::DeviceSplit* top_results, cudaStream_t stream);
+void LaunchRDNA2BestSplitPairScanKernel(
+    const RDNA2BestSplitEngine::FeatureMeta* feature_meta, const uint64_t* hist_offsets,
+    const int8_t* used_features, int num_features,
+    const hist_t* first_histogram, double first_sum_gradients, double first_sum_hessians,
+    data_size_t first_num_data, const hist_t* second_histogram, double second_sum_gradients,
+    double second_sum_hessians, data_size_t second_num_data, double lambda_l1, double lambda_l2,
+    data_size_t min_data_in_leaf, double min_sum_hessian_in_leaf, double min_gain_to_split,
+    RDNA2BestSplitEngine::DeviceSplit* results, cudaStream_t stream);
+void LaunchRDNA2BestSplitTopKFromCandidates(
+    const RDNA2BestSplitEngine::DeviceSplit* results, int num_features, int top_k,
+    const hist_t* first_histogram, const hist_t* second_histogram, const uint64_t* hist_offsets,
+    const RDNA2BestSplitEngine::FeatureMeta* feature_meta,
+    RDNA2BestSplitEngine::DeviceSplit* top_results, hist_t* candidate_histograms, cudaStream_t stream);
 void LaunchRDNA2BestSplitPairKernelAndGather(
     const RDNA2BestSplitEngine::FeatureMeta* feature_meta, const uint64_t* hist_offsets,
     const int8_t* used_features, int num_features,

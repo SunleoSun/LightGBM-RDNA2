@@ -353,4 +353,35 @@ void LaunchRDNA2BestSplitPairKernelAndGather(
   CUDASUCCESS_OR_FATAL(cudaGetLastError());
 }
 
+void LaunchRDNA2BestSplitPairScanKernel(
+    const RDNA2BestSplitEngine::FeatureMeta* feature_meta, const uint64_t* hist_offsets,
+    const int8_t* used_features, int num_features,
+    const hist_t* first_histogram, double first_sum_gradients, double first_sum_hessians,
+    data_size_t first_num_data, const hist_t* second_histogram, double second_sum_gradients,
+    double second_sum_hessians, data_size_t second_num_data, double lambda_l1, double lambda_l2,
+    data_size_t min_data_in_leaf, double min_sum_hessian_in_leaf, double min_gain_to_split,
+    RDNA2BestSplitEngine::DeviceSplit* results, cudaStream_t stream) {
+  const dim3 block(kBestSplitThreads);
+  constexpr int kWavesPerBlock = kBestSplitThreads / kWaveSize;
+  const dim3 grid(static_cast<unsigned int>((num_features + kWavesPerBlock - 1) / kWavesPerBlock), 2);
+  RDNA2BestSplitKernel<<<grid, block, 0, stream>>>(
+      feature_meta, hist_offsets, used_features, num_features, first_histogram, second_histogram,
+      first_sum_gradients, first_sum_hessians, first_num_data,
+      second_sum_gradients, second_sum_hessians, second_num_data,
+      lambda_l1, lambda_l2, min_data_in_leaf, min_sum_hessian_in_leaf, min_gain_to_split, 2, results);
+  CUDASUCCESS_OR_FATAL(cudaGetLastError());
+}
+
+void LaunchRDNA2BestSplitTopKFromCandidates(
+    const RDNA2BestSplitEngine::DeviceSplit* results, int num_features, int top_k,
+    const hist_t* first_histogram, const hist_t* second_histogram, const uint64_t* hist_offsets,
+    const RDNA2BestSplitEngine::FeatureMeta* feature_meta,
+    RDNA2BestSplitEngine::DeviceSplit* top_results, hist_t* candidate_histograms, cudaStream_t stream) {
+  const dim3 block(kBestSplitThreads);
+  RDNA2BestSplitTopKKernel<<<2, block, 0, stream>>>(
+      results, num_features, top_k, top_results, first_histogram, second_histogram, hist_offsets,
+      feature_meta, candidate_histograms, 2);
+  CUDASUCCESS_OR_FATAL(cudaGetLastError());
+}
+
 }  // namespace LightGBM

@@ -82,6 +82,29 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
                                                 ptr_smaller_leaf_hist_data, smaller_leaf_splits_->leaf_index(),
                                                 larger_leaf_splits_ == nullptr ? -1 : larger_leaf_splits_->leaf_index(),
                                                 use_subtract, UseRDNA2ExactBestSplit())) {
+#ifndef TIMETAG
+        if (config_->feature_fraction >= 1.0 && UseRDNA2ExactBestSplit() && use_subtract &&
+            larger_leaf_splits_ != nullptr &&
+            larger_leaf_splits_->leaf_index() >= 0) {
+          const int smaller_leaf = smaller_leaf_splits_->leaf_index();
+          const int larger_leaf = larger_leaf_splits_->leaf_index();
+          if (histogram_engine_.best_split_pool_histogram_valid(smaller_leaf) &&
+              histogram_engine_.best_split_pool_histogram_valid(larger_leaf)) {
+            const std::vector<int8_t> node_used_features(static_cast<size_t>(num_features_), 1);
+            if (best_split_engine_.PreparePairCandidates(
+                    config_, smaller_leaf_histogram_array_,
+                    histogram_engine_.best_split_pool_histogram(smaller_leaf),
+                    smaller_leaf_splits_->sum_gradients(), smaller_leaf_splits_->sum_hessians(),
+                    smaller_leaf_splits_->num_data_in_leaf(), larger_leaf_histogram_array_,
+                    histogram_engine_.best_split_pool_histogram(larger_leaf),
+                    larger_leaf_splits_->sum_gradients(), larger_leaf_splits_->sum_hessians(),
+                    larger_leaf_splits_->num_data_in_leaf(), is_feature_used, node_used_features,
+                    histogram_engine_.stream())) {
+              histogram_engine_.RecordBestSplitReadyEvent();
+            }
+          }
+        }
+#endif
 #ifdef TIMETAG
         ++profile_rdna2_histogram_calls_;
 #endif

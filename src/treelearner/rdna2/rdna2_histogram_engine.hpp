@@ -244,6 +244,9 @@ class RDNA2HistogramEngine {
 
   bool best_split_pool_enabled() const { return best_split_pool_max_leaves_ > 0; }
   cudaEvent_t best_split_ready_event() const { return best_split_ready_event_; }
+  void RecordBestSplitReadyEvent() {
+    CUDASUCCESS_OR_FATAL(cudaEventRecord(best_split_ready_event_, stream_));
+  }
   bool best_split_pool_histogram_valid(int leaf) const {
     return leaf >= 0 && leaf < best_split_pool_max_leaves_ &&
            best_split_pool_valid_[static_cast<size_t>(leaf)] != 0;

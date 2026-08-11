@@ -69,6 +69,9 @@ void RDNA2BestSplitEngine::Init(const Dataset* train_data, int gpu_device_id) {
   }
   hist_offsets_initialized_ = false;
   used_features_initialized_ = false;
+  prepared_pair_valid_ = false;
+  prepared_first_histogram_ = nullptr;
+  prepared_second_histogram_ = nullptr;
   hist_offsets_.Resize(static_cast<size_t>(num_features_));
   used_features_.Resize(static_cast<size_t>(num_features_));
   results_.Resize(static_cast<size_t>(num_features_) * 2);
@@ -100,6 +103,69 @@ bool RDNA2BestSplitEngine::ShadowFindDevice(const Config* config, FeatureHistogr
                         sum_gradients, sum_hessians, num_data, parent_output, &cpu_best, nullptr, leaf_name);
 }
 
+bool RDNA2BestSplitEngine::PreparePairCandidates(
+    const Config* config, FeatureHistogram* first_histogram_array,
+    const hist_t* first_device_histogram, double first_sum_gradients, double first_sum_hessians,
+    data_size_t first_num_data, FeatureHistogram* second_histogram_array,
+    const hist_t* second_device_histogram, double second_sum_gradients, double second_sum_hessians,
+    data_size_t second_num_data, const std::vector<int8_t>& is_feature_used,
+    const std::vector<int8_t>& node_used_features, cudaStream_t producer_stream) {
+  prepared_pair_valid_ = false;
+  prepared_first_histogram_ = nullptr;
+  prepared_second_histogram_ = nullptr;
+  if (!eligible_ || config == nullptr || first_histogram_array == nullptr || second_histogram_array == nullptr ||
+      first_device_histogram == nullptr || second_device_histogram == nullptr || producer_stream == nullptr ||
+      first_num_data <= 0 || second_num_data <= 0 || config->use_quantized_grad || config->extra_trees ||
+      !config->monotone_constraints.empty() || !config->feature_contri.empty() ||
+      config->max_delta_step > 0.0 || config->path_smooth > kEpsilon ||
+      is_feature_used.size() != static_cast<size_t>(num_features_) ||
+      node_used_features.size() != static_cast<size_t>(num_features_)) {
+    return false;
+  }
+
+  hist_t* host_base = first_histogram_array[0].RawData() - kHistOffset;
+  bool upload_offsets = !hist_offsets_initialized_;
+  bool upload_used_features = !used_features_initialized_;
+  for (int feature = 0; feature < num_features_; ++feature) {
+    if (upload_offsets) {
+      const ptrdiff_t offset = first_histogram_array[feature].RawData() - host_base;
+      if (offset < 0 || static_cast<size_t>(offset) >= num_total_bins_ * 2) {
+        return false;
+      }
+      host_hist_offsets_[static_cast<size_t>(feature)] = static_cast<uint64_t>(offset);
+    }
+    const int8_t used = static_cast<int8_t>(
+        is_feature_used[static_cast<size_t>(feature)] != 0 &&
+        node_used_features[static_cast<size_t>(feature)] != 0);
+    if (host_used_features_[static_cast<size_t>(feature)] != used) {
+      host_used_features_[static_cast<size_t>(feature)] = used;
+      upload_used_features = true;
+    }
+  }
+  if (upload_offsets) {
+    CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(hist_offsets_.RawData(), host_hist_offsets_.data(),
+                                         host_hist_offsets_.size() * sizeof(uint64_t),
+                                         cudaMemcpyHostToDevice, producer_stream));
+    hist_offsets_initialized_ = true;
+  }
+  if (upload_used_features) {
+    CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(used_features_.RawData(), host_used_features_.data(),
+                                         host_used_features_.size() * sizeof(int8_t),
+                                         cudaMemcpyHostToDevice, producer_stream));
+    used_features_initialized_ = true;
+  }
+  LaunchRDNA2BestSplitPairScanKernel(
+      feature_meta_.RawDataReadOnly(), hist_offsets_.RawDataReadOnly(), used_features_.RawDataReadOnly(),
+      num_features_, first_device_histogram, first_sum_gradients, first_sum_hessians, first_num_data,
+      second_device_histogram, second_sum_gradients, second_sum_hessians, second_num_data,
+      config->lambda_l1, config->lambda_l2, config->min_data_in_leaf, config->min_sum_hessian_in_leaf,
+      config->min_gain_to_split, results_.RawData(), producer_stream);
+  prepared_first_histogram_ = first_device_histogram;
+  prepared_second_histogram_ = second_device_histogram;
+  prepared_pair_valid_ = true;
+  return true;
+}
+
 bool RDNA2BestSplitEngine::FindBestDeviceExact(const Config* config, FeatureHistogram* histogram_array,
                                                 const hist_t* device_histogram,
                                                 const std::vector<int8_t>& is_feature_used,
@@ -107,6 +173,9 @@ bool RDNA2BestSplitEngine::FindBestDeviceExact(const Config* config, FeatureHist
                                                  double sum_gradients, double sum_hessians, data_size_t num_data,
                                                  double parent_output, cudaEvent_t histogram_ready_event,
                                                  SplitInfo* exact_result) {
+  prepared_pair_valid_ = false;
+  prepared_first_histogram_ = nullptr;
+  prepared_second_histogram_ = nullptr;
   if (device_histogram == nullptr || exact_result == nullptr) {
     return false;
   }
@@ -142,49 +211,63 @@ bool RDNA2BestSplitEngine::FindBestDeviceExactPair(
     CUDASUCCESS_OR_FATAL(cudaStreamWaitEvent(stream_, histogram_ready_event, 0));
   }
 
-  hist_t* host_base = first_histogram_array[0].RawData() - kHistOffset;
-  bool upload_offsets = !hist_offsets_initialized_;
-  bool upload_used_features = !used_features_initialized_;
-  for (int feature = 0; feature < num_features_; ++feature) {
-    if (upload_offsets) {
-      const ptrdiff_t offset = first_histogram_array[feature].RawData() - host_base;
-      if (offset < 0 || static_cast<size_t>(offset) >= num_total_bins_ * 2) {
-        return false;
+  const bool use_prepared_pair = prepared_pair_valid_ &&
+      prepared_first_histogram_ == first_device_histogram &&
+      prepared_second_histogram_ == second_device_histogram;
+  if (!use_prepared_pair) {
+    hist_t* host_base = first_histogram_array[0].RawData() - kHistOffset;
+    bool upload_offsets = !hist_offsets_initialized_;
+    bool upload_used_features = !used_features_initialized_;
+    for (int feature = 0; feature < num_features_; ++feature) {
+      if (upload_offsets) {
+        const ptrdiff_t offset = first_histogram_array[feature].RawData() - host_base;
+        if (offset < 0 || static_cast<size_t>(offset) >= num_total_bins_ * 2) {
+          return false;
+        }
+        host_hist_offsets_[static_cast<size_t>(feature)] = static_cast<uint64_t>(offset);
       }
-      host_hist_offsets_[static_cast<size_t>(feature)] = static_cast<uint64_t>(offset);
+      const int8_t used = static_cast<int8_t>(
+          is_feature_used[static_cast<size_t>(feature)] != 0 &&
+          node_used_features[static_cast<size_t>(feature)] != 0);
+      if (host_used_features_[static_cast<size_t>(feature)] != used) {
+        host_used_features_[static_cast<size_t>(feature)] = used;
+        upload_used_features = true;
+      }
     }
-    const int8_t used = static_cast<int8_t>(
-        is_feature_used[static_cast<size_t>(feature)] != 0 &&
-        node_used_features[static_cast<size_t>(feature)] != 0);
-    if (host_used_features_[static_cast<size_t>(feature)] != used) {
-      host_used_features_[static_cast<size_t>(feature)] = used;
-      upload_used_features = true;
+    if (upload_offsets) {
+      CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(hist_offsets_.RawData(), host_hist_offsets_.data(),
+                                           host_hist_offsets_.size() * sizeof(uint64_t),
+                                           cudaMemcpyHostToDevice, stream_));
+      hist_offsets_initialized_ = true;
+    }
+    if (upload_used_features) {
+      CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(used_features_.RawData(), host_used_features_.data(),
+                                           host_used_features_.size() * sizeof(int8_t),
+                                           cudaMemcpyHostToDevice, stream_));
+      used_features_initialized_ = true;
     }
   }
-  if (upload_offsets) {
-    CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(hist_offsets_.RawData(), host_hist_offsets_.data(),
-                                         host_hist_offsets_.size() * sizeof(uint64_t),
-                                         cudaMemcpyHostToDevice, stream_));
-    hist_offsets_initialized_ = true;
-  }
-  if (upload_used_features) {
-    CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(used_features_.RawData(), host_used_features_.data(),
-                                         host_used_features_.size() * sizeof(int8_t),
-                                         cudaMemcpyHostToDevice, stream_));
-    used_features_initialized_ = true;
-  }
-
   constexpr int kExactTopK = 2;
 #ifdef TIMETAG
   const auto kernel_start = std::chrono::steady_clock::now();
 #endif
-  LaunchRDNA2BestSplitPairKernelAndGather(
-      feature_meta_.RawDataReadOnly(), hist_offsets_.RawDataReadOnly(), used_features_.RawDataReadOnly(),
-      num_features_, first_device_histogram, first_sum_gradients, first_sum_hessians, first_num_data,
-      second_device_histogram, second_sum_gradients, second_sum_hessians, second_num_data,
-      config->lambda_l1, config->lambda_l2, config->min_data_in_leaf, config->min_sum_hessian_in_leaf,
-      config->min_gain_to_split, kExactTopK, results_.RawData(), top_results_.RawData(),
-      candidate_histograms_.RawData(), stream_);
+  if (use_prepared_pair) {
+    LaunchRDNA2BestSplitTopKFromCandidates(
+        results_.RawDataReadOnly(), num_features_, kExactTopK, first_device_histogram, second_device_histogram,
+        hist_offsets_.RawDataReadOnly(), feature_meta_.RawDataReadOnly(), top_results_.RawData(),
+        candidate_histograms_.RawData(), stream_);
+  } else {
+    LaunchRDNA2BestSplitPairKernelAndGather(
+        feature_meta_.RawDataReadOnly(), hist_offsets_.RawDataReadOnly(), used_features_.RawDataReadOnly(),
+        num_features_, first_device_histogram, first_sum_gradients, first_sum_hessians, first_num_data,
+        second_device_histogram, second_sum_gradients, second_sum_hessians, second_num_data,
+        config->lambda_l1, config->lambda_l2, config->min_data_in_leaf, config->min_sum_hessian_in_leaf,
+        config->min_gain_to_split, kExactTopK, results_.RawData(), top_results_.RawData(),
+        candidate_histograms_.RawData(), stream_);
+  }
+  prepared_pair_valid_ = false;
+  prepared_first_histogram_ = nullptr;
+  prepared_second_histogram_ = nullptr;
   CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(host_top_results_.data(), top_results_.RawDataReadOnly(),
                                        2 * kExactTopK * sizeof(DeviceSplit),
                                        cudaMemcpyDeviceToHost, stream_));
