@@ -39,6 +39,11 @@ class DatasetLoader {
                                                    data_size_t num_local_data,
                                                    int64_t num_dist_data);
 
+  Dataset* ConstructFromDenseFloat32(const float* data,
+                                     int num_row,
+                                     int num_col,
+                                     const std::vector<int32_t>& sample_indices);
+
   /*! \brief Disable copy */
   DatasetLoader& operator=(const DatasetLoader&) = delete;
   /*! \brief Disable copy */

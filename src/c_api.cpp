@@ -1355,35 +1355,44 @@ int LGBM_DatasetCreateFromMats(int32_t nmat,
   if (reference == nullptr) {
     // sample data first
     auto sample_indices = CreateSampleIndices(total_nrow, config);
-    int sample_cnt = static_cast<int>(sample_indices.size());
-    std::vector<std::vector<double>> sample_values(ncol);
-    std::vector<std::vector<int>> sample_idx(ncol);
+    // The production Python path supplies one local C-contiguous float32 matrix.
+    // Keep all other C API layouts on the canonical generic loader.
+    const bool dense_row_major_float32 =
+        nmat == 1 && data_type == C_API_DTYPE_FLOAT32 && is_row_major[0] != 0 &&
+        Network::num_machines() == 1;
+    DatasetLoader loader(config, nullptr, 1, nullptr);
+    if (dense_row_major_float32) {
+      ret.reset(loader.ConstructFromDenseFloat32(
+          reinterpret_cast<const float*>(data[0]), nrow[0], ncol, sample_indices));
+    } else {
+      int sample_cnt = static_cast<int>(sample_indices.size());
+      std::vector<std::vector<double>> sample_values(ncol);
+      std::vector<std::vector<int>> sample_idx(ncol);
+      int offset = 0;
+      int j = 0;
+      for (size_t i = 0; i < sample_indices.size(); ++i) {
+        auto idx = sample_indices[i];
+        while ((idx - offset) >= nrow[j]) {
+          offset += nrow[j];
+          ++j;
+        }
 
-    int offset = 0;
-    int j = 0;
-    for (size_t i = 0; i < sample_indices.size(); ++i) {
-      auto idx = sample_indices[i];
-      while ((idx - offset) >= nrow[j]) {
-        offset += nrow[j];
-        ++j;
-      }
-
-      auto row = get_row_fun[j](static_cast<int>(idx - offset));
-      for (size_t k = 0; k < row.size(); ++k) {
-        if (std::fabs(row[k]) > kZeroThreshold || std::isnan(row[k])) {
-          sample_values[k].emplace_back(row[k]);
-          sample_idx[k].emplace_back(static_cast<int>(i));
+        auto row = get_row_fun[j](static_cast<int>(idx - offset));
+        for (size_t k = 0; k < row.size(); ++k) {
+          if (std::fabs(row[k]) > kZeroThreshold || std::isnan(row[k])) {
+            sample_values[k].emplace_back(row[k]);
+            sample_idx[k].emplace_back(static_cast<int>(i));
+          }
         }
       }
+      ret.reset(loader.ConstructFromSampleData(Vector2Ptr<double>(&sample_values).data(),
+                                               Vector2Ptr<int>(&sample_idx).data(),
+                                               ncol,
+                                               VectorSize<double>(sample_values).data(),
+                                               sample_cnt,
+                                               total_nrow,
+                                               total_nrow));
     }
-    DatasetLoader loader(config, nullptr, 1, nullptr);
-    ret.reset(loader.ConstructFromSampleData(Vector2Ptr<double>(&sample_values).data(),
-                                             Vector2Ptr<int>(&sample_idx).data(),
-                                             ncol,
-                                             VectorSize<double>(sample_values).data(),
-                                             sample_cnt,
-                                             total_nrow,
-                                             total_nrow));
   } else {
     ret.reset(new Dataset(total_nrow));
     ret->CreateValid(
@@ -1392,20 +1401,38 @@ int LGBM_DatasetCreateFromMats(int32_t nmat,
       ret->ResizeRaw(total_nrow);
     }
   }
-  int32_t start_row = 0;
-  for (int j = 0; j < nmat; ++j) {
+  const bool dense_row_major_float32 =
+      nmat == 1 && data_type == C_API_DTYPE_FLOAT32 && is_row_major[0] != 0;
+  if (dense_row_major_float32) {
+    const float* data_ptr = reinterpret_cast<const float*>(data[0]);
     OMP_INIT_EX();
     #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-    for (int i = 0; i < nrow[j]; ++i) {
+    for (int i = 0; i < nrow[0]; ++i) {
       OMP_LOOP_EX_BEGIN();
       const int tid = omp_get_thread_num();
-      auto one_row = get_row_fun[j](i);
-      ret->PushOneRow(tid, start_row + i, one_row);
+      const float* row_ptr = data_ptr + static_cast<size_t>(i) * ncol;
+      for (int k = 0; k < ncol; ++k) {
+        ret->PushOneValue(tid, i, static_cast<size_t>(k), static_cast<double>(row_ptr[k]));
+      }
       OMP_LOOP_EX_END();
     }
     OMP_THROW_EX();
+  } else {
+    int32_t start_row = 0;
+    for (int j = 0; j < nmat; ++j) {
+      OMP_INIT_EX();
+      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+      for (int i = 0; i < nrow[j]; ++i) {
+        OMP_LOOP_EX_BEGIN();
+        const int tid = omp_get_thread_num();
+        auto one_row = get_row_fun[j](i);
+        ret->PushOneRow(tid, start_row + i, one_row);
+        OMP_LOOP_EX_END();
+      }
+      OMP_THROW_EX();
 
-    start_row += nrow[j];
+      start_row += nrow[j];
+    }
   }
   ret->FinishLoad();
   *out = ret.release();

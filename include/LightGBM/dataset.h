@@ -508,7 +508,10 @@ class Dataset {
     const int* num_per_col,
     int num_sample_col,
     size_t total_sample_cnt,
-    const Config& io_config);
+    const Config& io_config,
+    bool sample_indices_are_fixed = false,
+    const int* fixed_num_per_col = nullptr,
+    bool sample_features_are_pairwise_unbundleable = false);
 
   /*! \brief Destructor */
   LIGHTGBM_EXPORT ~Dataset();

@@ -761,6 +761,170 @@ Dataset* DatasetLoader::ConstructFromSampleData(double** sample_values,
   return dataset.release();
 }
 
+Dataset* DatasetLoader::ConstructFromDenseFloat32(
+    const float* data, int num_row, int num_col,
+    const std::vector<int32_t>& sample_indices) {
+  CHECK_EQ(Network::num_machines(), 1);
+  const int sample_cnt = static_cast<int>(sample_indices.size());
+  CheckSampleSize(sample_indices.size(), static_cast<size_t>(num_row));
+  if (feature_names_.empty()) {
+    for (int i = 0; i < num_col; ++i) {
+      std::stringstream str_buf;
+      str_buf << "Column_" << i;
+      feature_names_.push_back(str_buf.str());
+    }
+  }
+  if (!config_.max_bin_by_feature.empty()) {
+    CHECK_EQ(static_cast<size_t>(num_col), config_.max_bin_by_feature.size());
+    CHECK_GT(*(std::min_element(config_.max_bin_by_feature.begin(),
+                                config_.max_bin_by_feature.end())), 1);
+  }
+
+  auto forced_bin_bounds = DatasetLoader::GetForcedBins(
+      config_.forcedbins_filename, num_col, categorical_features_);
+  const data_size_t filter_cnt = static_cast<data_size_t>(
+      static_cast<double>(config_.min_data_in_leaf * sample_indices.size()) / num_row);
+  std::vector<std::unique_ptr<BinMapper>> bin_mappers(num_col);
+  std::vector<int> raw_num_per_col(num_col, 0);
+  std::vector<int> fixed_num_per_col(num_col, 0);
+
+  OMP_INIT_EX();
+  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(guided)
+  for (int feature = 0; feature < num_col; ++feature) {
+    OMP_LOOP_EX_BEGIN();
+    if (ignore_features_.count(feature) > 0) {
+      continue;
+    }
+    BinType bin_type = BinType::NumericalBin;
+    if (categorical_features_.count(feature)) {
+      bin_type = BinType::CategoricalBin;
+      const bool feat_is_unconstrained =
+          config_.monotone_constraints.empty() || config_.monotone_constraints[feature] == 0;
+      if (!feat_is_unconstrained) {
+        Log::Fatal("The output cannot be monotone with respect to categorical features");
+      }
+    }
+
+    std::vector<double> values;
+    values.reserve(sample_cnt);
+    for (int sample_pos = 0; sample_pos < sample_cnt; ++sample_pos) {
+      const float value = data[static_cast<size_t>(sample_indices[sample_pos]) * num_col + feature];
+      if (std::fabs(value) > kZeroThreshold || std::isnan(value)) {
+        values.emplace_back(static_cast<double>(value));
+      }
+    }
+    raw_num_per_col[feature] = static_cast<int>(values.size());
+
+    bin_mappers[feature].reset(new BinMapper());
+    const int max_bin = config_.max_bin_by_feature.empty()
+                            ? config_.max_bin
+                            : config_.max_bin_by_feature[feature];
+    bin_mappers[feature]->FindBin(
+        values.data(), static_cast<int>(values.size()), sample_indices.size(),
+        max_bin, config_.min_data_in_bin, filter_cnt, config_.feature_pre_filter,
+        bin_type, config_.use_missing, config_.zero_as_missing,
+        forced_bin_bounds[feature]);
+
+    const int most_freq_bin = bin_mappers[feature]->GetMostFreqBin();
+    const bool default_is_most_freq =
+        bin_mappers[feature]->GetDefaultBin() == most_freq_bin;
+    if (default_is_most_freq) {
+      fixed_num_per_col[feature] = raw_num_per_col[feature];
+    } else {
+      int fixed_count = 0;
+      for (int sample_pos = 0; sample_pos < sample_cnt; ++sample_pos) {
+        const float value = data[static_cast<size_t>(sample_indices[sample_pos]) * num_col + feature];
+        const bool explicitly_sampled =
+            std::fabs(value) > kZeroThreshold || std::isnan(value);
+        if (!explicitly_sampled ||
+            bin_mappers[feature]->ValueToBin(static_cast<double>(value)) != most_freq_bin) {
+          ++fixed_count;
+        }
+      }
+      fixed_num_per_col[feature] =
+          fixed_count == 0 ? raw_num_per_col[feature] : fixed_count;
+    }
+    OMP_LOOP_EX_END();
+  }
+  OMP_THROW_EX();
+
+  // FindGroups can only add a feature when the group's non-default count plus
+  // the candidate count is at most sample_cnt + the canonical conflict budget.
+  // If every used feature alone exceeds half of that limit, every canonical
+  // EFB group is provably a singleton, so materializing O(rows * features)
+  // sample index vectors cannot affect the grouping result.
+  bool pairwise_unbundleable = true;
+  const int single_val_max_conflict_cnt = sample_cnt / 10000;
+  for (int feature = 0; feature < num_col; ++feature) {
+    if (bin_mappers[feature] != nullptr && !bin_mappers[feature]->is_trivial() &&
+        static_cast<int64_t>(fixed_num_per_col[feature]) * 2 <=
+            static_cast<int64_t>(sample_cnt) + single_val_max_conflict_cnt) {
+      pairwise_unbundleable = false;
+      break;
+    }
+  }
+
+  std::vector<std::vector<int>> fixed_indices;
+  std::vector<int*> fixed_index_ptrs;
+  if (!pairwise_unbundleable && config_.enable_bundle) {
+    fixed_indices.resize(num_col);
+    OMP_INIT_EX();
+    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(guided)
+    for (int feature = 0; feature < num_col; ++feature) {
+      OMP_LOOP_EX_BEGIN();
+      if (bin_mappers[feature] == nullptr) {
+        continue;
+      }
+      auto& feature_indices = fixed_indices[feature];
+      feature_indices.reserve(fixed_num_per_col[feature]);
+      const int most_freq_bin = bin_mappers[feature]->GetMostFreqBin();
+      const bool default_is_most_freq =
+          bin_mappers[feature]->GetDefaultBin() == most_freq_bin;
+      if (default_is_most_freq) {
+        for (int sample_pos = 0; sample_pos < sample_cnt; ++sample_pos) {
+          const float value = data[static_cast<size_t>(sample_indices[sample_pos]) * num_col + feature];
+          if (std::fabs(value) > kZeroThreshold || std::isnan(value)) {
+            feature_indices.emplace_back(sample_pos);
+          }
+        }
+      } else {
+        for (int sample_pos = 0; sample_pos < sample_cnt; ++sample_pos) {
+          const float value = data[static_cast<size_t>(sample_indices[sample_pos]) * num_col + feature];
+          const bool explicitly_sampled =
+              std::fabs(value) > kZeroThreshold || std::isnan(value);
+          if (!explicitly_sampled ||
+              bin_mappers[feature]->ValueToBin(static_cast<double>(value)) != most_freq_bin) {
+            feature_indices.emplace_back(sample_pos);
+          }
+        }
+        if (feature_indices.empty()) {
+          for (int sample_pos = 0; sample_pos < sample_cnt; ++sample_pos) {
+            const float value = data[static_cast<size_t>(sample_indices[sample_pos]) * num_col + feature];
+            if (std::fabs(value) > kZeroThreshold || std::isnan(value)) {
+              feature_indices.emplace_back(sample_pos);
+            }
+          }
+        }
+      }
+      OMP_LOOP_EX_END();
+    }
+    OMP_THROW_EX();
+    fixed_index_ptrs = Common::Vector2Ptr<int>(&fixed_indices);
+  }
+
+  CheckCategoricalFeatureNumBin(bin_mappers, config_.max_bin, config_.max_bin_by_feature);
+  auto dataset = std::unique_ptr<Dataset>(new Dataset(num_row));
+  dataset->Construct(&bin_mappers, num_col, forced_bin_bounds,
+                     fixed_index_ptrs.empty() ? nullptr : fixed_index_ptrs.data(),
+                     nullptr, raw_num_per_col.data(), num_col,
+                     sample_indices.size(), config_, !pairwise_unbundleable,
+                     fixed_num_per_col.data(), pairwise_unbundleable);
+  if (dataset->has_raw()) {
+    dataset->ResizeRaw(num_row);
+  }
+  dataset->set_feature_names(feature_names_);
+  return dataset.release();
+}
 
 // ---- private functions ----
 

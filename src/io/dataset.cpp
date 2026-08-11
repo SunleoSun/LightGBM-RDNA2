@@ -327,6 +327,57 @@ std::vector<std::vector<int>> FastFeatureBundling(
   return features_in_group;
 }
 
+std::vector<std::vector<int>> FastFeatureBundlingFromFixedIndices(
+    const std::vector<std::unique_ptr<BinMapper>>& bin_mappers,
+    int** sample_indices, const int* raw_num_per_col,
+    const int* fixed_num_per_col, int num_sample_col,
+    data_size_t total_sample_cnt, const std::vector<int>& used_features,
+    data_size_t num_data, bool is_use_gpu, bool is_sparse,
+    std::vector<int8_t>* multi_val_group) {
+  Common::FunctionTimer fun_timer("Dataset::FastFeatureBundling", global_timer);
+  std::vector<size_t> feature_non_zero_cnt;
+  feature_non_zero_cnt.reserve(used_features.size());
+  for (auto fidx : used_features) {
+    feature_non_zero_cnt.emplace_back(fidx < num_sample_col ? raw_num_per_col[fidx] : 0);
+  }
+  std::vector<int> sorted_idx;
+  sorted_idx.reserve(used_features.size());
+  for (int i = 0; i < static_cast<int>(used_features.size()); ++i) {
+    sorted_idx.emplace_back(i);
+  }
+  std::stable_sort(sorted_idx.begin(), sorted_idx.end(),
+                   [&feature_non_zero_cnt](int a, int b) {
+                     return feature_non_zero_cnt[a] > feature_non_zero_cnt[b];
+                   });
+  std::vector<int> feature_order_by_cnt;
+  feature_order_by_cnt.reserve(sorted_idx.size());
+  for (auto sidx : sorted_idx) {
+    feature_order_by_cnt.push_back(used_features[sidx]);
+  }
+  std::vector<int8_t> group_is_multi_val, group_is_multi_val2;
+  auto features_in_group =
+      FindGroups(bin_mappers, used_features, sample_indices, fixed_num_per_col,
+                 num_sample_col, total_sample_cnt, num_data, is_use_gpu,
+                 is_sparse, &group_is_multi_val);
+  auto group2 =
+      FindGroups(bin_mappers, feature_order_by_cnt, sample_indices, fixed_num_per_col,
+                 num_sample_col, total_sample_cnt, num_data, is_use_gpu,
+                 is_sparse, &group_is_multi_val2);
+  if (features_in_group.size() > group2.size()) {
+    features_in_group = group2;
+    group_is_multi_val = group_is_multi_val2;
+  }
+  int num_group = static_cast<int>(features_in_group.size());
+  Random tmp_rand(num_data);
+  for (int i = 0; i < num_group - 1; ++i) {
+    int j = tmp_rand.NextShort(i + 1, num_group);
+    std::swap(features_in_group[i], features_in_group[j]);
+    std::swap(group_is_multi_val[i], group_is_multi_val[j]);
+  }
+  *multi_val_group = group_is_multi_val;
+  return features_in_group;
+}
+
 void Dataset::Construct(std::vector<std::unique_ptr<BinMapper>>* bin_mappers,
                         int num_total_features,
                         const std::vector<std::vector<double>>& forced_bins,
@@ -335,7 +386,10 @@ void Dataset::Construct(std::vector<std::unique_ptr<BinMapper>>* bin_mappers,
                         const int* num_per_col,
                         int num_sample_col,
                         size_t total_sample_cnt,
-                        const Config& io_config) {
+                        const Config& io_config,
+                        bool sample_indices_are_fixed,
+                        const int* fixed_num_per_col,
+                        bool sample_features_are_pairwise_unbundleable) {
   num_total_features_ = num_total_features;
   CHECK_EQ(num_total_features_, static_cast<int>(bin_mappers->size()));
   // get num_features
@@ -366,11 +420,29 @@ void Dataset::Construct(std::vector<std::unique_ptr<BinMapper>>* bin_mappers,
   std::vector<int8_t> group_is_multi_val(used_features.size(), 0);
   if (io_config.enable_bundle && !used_features.empty()) {
     bool lgbm_is_gpu_used = io_config.device_type == std::string("gpu") || io_config.device_type == std::string("cuda");
-    features_in_group = FastFeatureBundling(
-        *bin_mappers, sample_non_zero_indices, sample_values, num_per_col,
-        num_sample_col, static_cast<data_size_t>(total_sample_cnt),
-        used_features, num_data_, lgbm_is_gpu_used,
-        is_sparse, &group_is_multi_val);
+    if (sample_features_are_pairwise_unbundleable) {
+      // The loader proved that canonical FindGroups must produce singleton
+      // groups. Preserve its deterministic final shuffle without allocating
+      // or scanning the per-feature sample index vectors.
+      const int num_group = static_cast<int>(features_in_group.size());
+      Random tmp_rand(num_data_);
+      for (int i = 0; i < num_group - 1; ++i) {
+        const int j = tmp_rand.NextShort(i + 1, num_group);
+        std::swap(features_in_group[i], features_in_group[j]);
+      }
+    } else if (sample_indices_are_fixed) {
+      CHECK(fixed_num_per_col != nullptr);
+      features_in_group = FastFeatureBundlingFromFixedIndices(
+          *bin_mappers, sample_non_zero_indices, num_per_col, fixed_num_per_col,
+          num_sample_col, static_cast<data_size_t>(total_sample_cnt), used_features, num_data_,
+          lgbm_is_gpu_used, is_sparse, &group_is_multi_val);
+    } else {
+      features_in_group = FastFeatureBundling(
+          *bin_mappers, sample_non_zero_indices, sample_values, num_per_col,
+          num_sample_col, static_cast<data_size_t>(total_sample_cnt),
+          used_features, num_data_, lgbm_is_gpu_used,
+          is_sparse, &group_is_multi_val);
+    }
   }
 
   num_features_ = 0;
