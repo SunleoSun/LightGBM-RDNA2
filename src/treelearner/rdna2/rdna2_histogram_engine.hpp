@@ -57,7 +57,7 @@ class RDNA2HistogramEngine {
     }
   }
 
-  void Init(const Dataset* train_data, int gpu_device_id) {
+  void Init(const Dataset* train_data, int gpu_device_id, int max_leaves) {
     CHECK(train_data != nullptr);
     SetCUDADevice(gpu_device_id, __FILE__, __LINE__);
 
@@ -117,7 +117,16 @@ class RDNA2HistogramEngine {
                                  [](int bins) { return bins <= 128; });
 
     num_total_bins_ = static_cast<size_t>(train_data_->NumTotalBin());
+    best_split_pool_max_leaves_ = 0;
+    best_split_pool_valid_.clear();
     const size_t histogram_values = num_total_bins_ * 2;
+    constexpr size_t kBestSplitPoolMaxBytes = 512ull * 1024ull * 1024ull;
+    if (!h64_eligible_ && h128_eligible_ && max_leaves > 0 &&
+        histogram_values <= kBestSplitPoolMaxBytes / (static_cast<size_t>(max_leaves) * sizeof(hist_t))) {
+      best_split_pool_max_leaves_ = max_leaves;
+      best_split_histogram_pool_.Resize(histogram_values * static_cast<size_t>(max_leaves));
+      best_split_pool_valid_.assign(static_cast<size_t>(max_leaves), 0);
+    }
     if (host_histogram_staging_size_ != histogram_values) {
       if (host_histogram_staging_ != nullptr) {
         CUDASUCCESS_OR_FATAL(cudaFreeHost(host_histogram_staging_));
@@ -210,7 +219,20 @@ class RDNA2HistogramEngine {
   void BeforeTrain(const score_t* gradients, const score_t* hessians);
 
   bool ConstructHistogram(const std::vector<int8_t>& is_feature_used, const data_size_t* data_indices,
-                          data_size_t num_data, hist_t* host_histogram);
+                          data_size_t num_data, hist_t* host_histogram, int smaller_leaf,
+                          int larger_leaf, bool use_subtract);
+
+  bool best_split_pool_histogram_valid(int leaf) const {
+    return leaf >= 0 && leaf < best_split_pool_max_leaves_ &&
+           best_split_pool_valid_[static_cast<size_t>(leaf)] != 0;
+  }
+  const hist_t* best_split_pool_histogram(int leaf) const {
+    if (!best_split_pool_histogram_valid(leaf)) {
+      return nullptr;
+    }
+    return best_split_histogram_pool_.RawDataReadOnly() +
+           static_cast<size_t>(leaf) * num_total_bins_ * 2;
+  }
 
   void PreloadDataIndices(const data_size_t* data_indices, data_size_t num_data) {
     InvalidatePreloadedDataIndices();
@@ -337,6 +359,10 @@ class RDNA2HistogramEngine {
   CUDAVector<score_t> hessians_;
   CUDAVector<data_size_t> data_indices_;
   CUDAVector<hist_t> histogram_;
+  CUDAVector<hist_t> best_split_histogram_pool_;
+  int best_split_pool_max_leaves_ = 0;
+  std::vector<uint8_t> best_split_pool_valid_;
+  bool best_split_device_histogram_valid_ = false;
   hist_t* host_histogram_staging_ = nullptr;
   size_t host_histogram_staging_size_ = 0;
   cudaStream_t stream_ = nullptr;
