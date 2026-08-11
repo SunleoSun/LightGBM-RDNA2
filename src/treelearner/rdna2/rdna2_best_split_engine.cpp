@@ -56,6 +56,7 @@ void RDNA2BestSplitEngine::Init(const Dataset* train_data, int gpu_device_id) {
   feature_meta_.InitFromHostVector(host_feature_meta_);
   host_hist_offsets_.resize(static_cast<size_t>(num_features_));
   host_used_features_.assign(static_cast<size_t>(num_features_), 0);
+  host_top_results_.resize(8);
   hist_offsets_initialized_ = false;
   used_features_initialized_ = false;
   hist_offsets_.Resize(static_cast<size_t>(num_features_));
@@ -63,7 +64,9 @@ void RDNA2BestSplitEngine::Init(const Dataset* train_data, int gpu_device_id) {
   results_.Resize(static_cast<size_t>(num_features_));
   histogram_.Resize(num_total_bins_ * 2);
   best_result_.Resize(1);
+  top_results_.Resize(8);
 }
+
 bool RDNA2BestSplitEngine::ShadowFind(const Config* config, FeatureHistogram* histogram_array,
                                        const std::vector<int8_t>& is_feature_used,
                                        const std::vector<int8_t>& node_used_features,
@@ -132,6 +135,10 @@ bool RDNA2BestSplitEngine::ShadowFindImpl(const Config* config, FeatureHistogram
       upload_used_features = true;
     }
   }
+  // GPU arithmetic is only a nominator; always canonically rescan the two best GPU features
+  // in production so close CPU/GPU FP-order differences cannot change the selected feature.
+  constexpr int kExactTopK = 2;
+  const int top_k = exact_result != nullptr ? kExactTopK : 1;
 
 #ifdef TIMETAG
   auto stage_start = std::chrono::steady_clock::now();
@@ -164,10 +171,16 @@ bool RDNA2BestSplitEngine::ShadowFindImpl(const Config* config, FeatureHistogram
                              used_features_.RawDataReadOnly(), num_features_, device_histogram,
                              sum_gradients, sum_hessians, num_data, parent_output,
                              config->lambda_l1, config->lambda_l2, config->min_data_in_leaf,
-                             config->min_sum_hessian_in_leaf, config->min_gain_to_split,
-                             results_.RawData(), best_result_.RawData(), stream_);
-  CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(&host_best_result_, best_result_.RawDataReadOnly(),
-                                       sizeof(DeviceSplit), cudaMemcpyDeviceToHost, stream_));
+                             config->min_sum_hessian_in_leaf, config->min_gain_to_split, top_k,
+                             results_.RawData(), best_result_.RawData(), top_results_.RawData(), stream_);
+  if (top_k == 1) {
+    CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(&host_best_result_, best_result_.RawDataReadOnly(),
+                                         sizeof(DeviceSplit), cudaMemcpyDeviceToHost, stream_));
+  } else {
+    CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(host_top_results_.data(), top_results_.RawDataReadOnly(),
+                                         static_cast<size_t>(top_k) * sizeof(DeviceSplit),
+                                         cudaMemcpyDeviceToHost, stream_));
+  }
   SynchronizeCUDAStream(stream_, __FILE__, __LINE__);
 #ifdef TIMETAG
   stage_end = std::chrono::steady_clock::now();
@@ -175,41 +188,71 @@ bool RDNA2BestSplitEngine::ShadowFindImpl(const Config* config, FeatureHistogram
   ++profile_calls_;
 #endif
 
-  const DeviceSplit* gpu_best = host_best_result_.valid ? &host_best_result_ : nullptr;
+  const DeviceSplit* gpu_best = nullptr;
+  if (top_k == 1) {
+    gpu_best = host_best_result_.valid ? &host_best_result_ : nullptr;
+  } else if (!host_top_results_.empty() && host_top_results_[0].valid) {
+    gpu_best = &host_top_results_[0];
+  }
   const bool gpu_valid = gpu_best != nullptr;
   SplitInfo finalized;
   bool finalized_valid = false;
-  int finalized_inner_feature = -1;
+  std::vector<int> finalized_inner_features;
 #ifdef TIMETAG
   const auto finalize_start = std::chrono::steady_clock::now();
 #endif
   if (gpu_valid) {
-    finalized_inner_feature = train_data_->InnerFeatureIndex(gpu_best->feature);
-    if (finalized_inner_feature >= 0) {
+    const int candidate_count = top_k == 1 ? 1 : top_k;
+    finalized_inner_features.reserve(static_cast<size_t>(candidate_count));
+    for (int candidate_index = 0; candidate_index < candidate_count; ++candidate_index) {
+      const DeviceSplit& candidate = top_k == 1 ? *gpu_best : host_top_results_[static_cast<size_t>(candidate_index)];
+      if (!candidate.valid) {
+        continue;
+      }
+      const int inner_feature = train_data_->InnerFeatureIndex(candidate.feature);
+      if (inner_feature < 0) {
+        continue;
+      }
+      finalized_inner_features.push_back(inner_feature);
       if (exact_result != nullptr && !copy_host_histogram) {
-        const auto& meta = host_feature_meta_[static_cast<size_t>(finalized_inner_feature)];
+        const auto& meta = host_feature_meta_[static_cast<size_t>(inner_feature)];
         const size_t hist_values = static_cast<size_t>(meta.num_bin - meta.offset) * 2;
         CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(
-            histogram_array[finalized_inner_feature].RawData(),
-            device_histogram + host_hist_offsets_[static_cast<size_t>(finalized_inner_feature)],
+            histogram_array[inner_feature].RawData(),
+            device_histogram + host_hist_offsets_[static_cast<size_t>(inner_feature)],
             hist_values * sizeof(hist_t), cudaMemcpyDeviceToHost, stream_));
-        SynchronizeCUDAStream(stream_, __FILE__, __LINE__);
-        train_data_->FixHistogram(finalized_inner_feature, sum_gradients, sum_hessians,
-                                  histogram_array[finalized_inner_feature].RawData());
       }
-      histogram_array[finalized_inner_feature].FindBestThreshold(
-          sum_gradients, sum_hessians, num_data, nullptr, parent_output, &finalized);
-      finalized.feature = gpu_best->feature;
-      finalized_valid = finalized.gain > kMinScore;
     }
+    if (exact_result != nullptr && !copy_host_histogram && !finalized_inner_features.empty()) {
+      SynchronizeCUDAStream(stream_, __FILE__, __LINE__);
+    }
+    for (int inner_feature : finalized_inner_features) {
+      if (exact_result != nullptr && !copy_host_histogram) {
+        train_data_->FixHistogram(inner_feature, sum_gradients, sum_hessians,
+                                  histogram_array[inner_feature].RawData());
+      }
+      SplitInfo candidate_split;
+      histogram_array[inner_feature].FindBestThreshold(
+          sum_gradients, sum_hessians, num_data, nullptr, parent_output, &candidate_split);
+      candidate_split.feature = train_data_->RealFeatureIndex(inner_feature);
+      if (candidate_split > finalized) {
+        finalized = candidate_split;
+      }
+    }
+    finalized_valid = finalized.gain > kMinScore;
   }
 #ifdef TIMETAG
   const auto finalize_end = std::chrono::steady_clock::now();
   profile_finalize_ms_ += std::chrono::duration<double, std::milli>(finalize_end - finalize_start).count();
 #endif
   if (exact_result != nullptr) {
+    std::vector<uint8_t> was_finalized(static_cast<size_t>(num_features_), 0);
+    for (int inner_feature : finalized_inner_features) {
+      was_finalized[static_cast<size_t>(inner_feature)] = 1;
+    }
     for (int feature = 0; feature < num_features_; ++feature) {
-      if (host_used_features_[static_cast<size_t>(feature)] != 0 && feature != finalized_inner_feature) {
+      if (host_used_features_[static_cast<size_t>(feature)] != 0 &&
+          was_finalized[static_cast<size_t>(feature)] == 0) {
         histogram_array[feature].set_is_splittable(true);
       }
     }

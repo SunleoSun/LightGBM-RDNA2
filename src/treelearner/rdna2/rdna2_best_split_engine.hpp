@@ -83,6 +83,7 @@ class RDNA2BestSplitEngine {
   std::vector<FeatureMeta> host_feature_meta_;
   std::vector<uint64_t> host_hist_offsets_;
   std::vector<int8_t> host_used_features_;
+  std::vector<DeviceSplit> host_top_results_;
   bool hist_offsets_initialized_ = false;
   bool used_features_initialized_ = false;
   DeviceSplit host_best_result_{};
@@ -92,6 +93,7 @@ class RDNA2BestSplitEngine {
   CUDAVector<hist_t> histogram_;
   CUDAVector<DeviceSplit> results_;
   CUDAVector<DeviceSplit> best_result_;
+  CUDAVector<DeviceSplit> top_results_;
 #ifdef TIMETAG
   uint64_t profile_calls_ = 0;
   uint64_t profile_raw_feature_match_ = 0;
@@ -111,9 +113,10 @@ void LaunchRDNA2BestSplitKernel(const RDNA2BestSplitEngine::FeatureMeta* feature
                                  double sum_gradients, double sum_hessians, data_size_t num_data,
                                  double parent_output, double lambda_l1, double lambda_l2,
                                  data_size_t min_data_in_leaf, double min_sum_hessian_in_leaf,
-                                 double min_gain_to_split,
+                                 double min_gain_to_split, int top_k,
                                  RDNA2BestSplitEngine::DeviceSplit* results,
-                                 RDNA2BestSplitEngine::DeviceSplit* best_result, cudaStream_t stream);
+                                 RDNA2BestSplitEngine::DeviceSplit* best_result,
+                                 RDNA2BestSplitEngine::DeviceSplit* top_results, cudaStream_t stream);
 
 }  // namespace LightGBM
 

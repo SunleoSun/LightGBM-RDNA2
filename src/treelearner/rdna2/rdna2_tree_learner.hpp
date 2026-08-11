@@ -140,7 +140,7 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
 #else
     return !config_->use_quantized_grad && histogram_engine_.h128_eligible() &&
         !histogram_engine_.h64_eligible() && histogram_engine_.best_split_pool_enabled() &&
-        best_split_engine_.eligible() && cegb_ == nullptr && config_->feature_fraction >= 1.0 &&
+        best_split_engine_.eligible() && cegb_ == nullptr &&
         config_->feature_fraction_bynode >= 1.0 && config_->interaction_constraints.empty() &&
         !config_->extra_trees && config_->monotone_constraints.empty() && config_->feature_contri.empty() &&
         config_->max_delta_step <= 0.0 && config_->path_smooth <= kEpsilon;

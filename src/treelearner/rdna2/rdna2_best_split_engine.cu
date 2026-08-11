@@ -192,8 +192,8 @@ __device__ inline bool BetterDeviceSplit(const RDNA2BestSplitEngine::DeviceSplit
 }
 
 __global__ void RDNA2BestSplitReduceKernel(const RDNA2BestSplitEngine::DeviceSplit* results,
-                                            int num_features,
-                                            RDNA2BestSplitEngine::DeviceSplit* best_result) {
+                                             int num_features,
+                                             RDNA2BestSplitEngine::DeviceSplit* best_result) {
   __shared__ RDNA2BestSplitEngine::DeviceSplit shared[kBestSplitThreads];
   const int tid = static_cast<int>(threadIdx.x);
   RDNA2BestSplitEngine::DeviceSplit local{};
@@ -219,6 +219,48 @@ __global__ void RDNA2BestSplitReduceKernel(const RDNA2BestSplitEngine::DeviceSpl
   }
 }
 
+constexpr int kMaxTopK = 8;
+
+__global__ void RDNA2BestSplitTopKKernel(const RDNA2BestSplitEngine::DeviceSplit* results,
+                                          int num_features, int top_k,
+                                          RDNA2BestSplitEngine::DeviceSplit* top_results) {
+  __shared__ RDNA2BestSplitEngine::DeviceSplit shared[kBestSplitThreads];
+  __shared__ int selected_features[kMaxTopK];
+  const int tid = static_cast<int>(threadIdx.x);
+  for (int rank = 0; rank < top_k; ++rank) {
+    RDNA2BestSplitEngine::DeviceSplit local{};
+    local.feature = -1;
+    local.gain = kMinScore;
+    local.valid = 0;
+    for (int feature = tid; feature < num_features; feature += kBestSplitThreads) {
+      const auto candidate = results[feature];
+      bool already_selected = false;
+#pragma unroll
+      for (int selected = 0; selected < kMaxTopK; ++selected) {
+        if (selected < rank && candidate.feature == selected_features[selected]) {
+          already_selected = true;
+        }
+      }
+      if (!already_selected && BetterDeviceSplit(candidate, local)) {
+        local = candidate;
+      }
+    }
+    shared[tid] = local;
+    __syncthreads();
+    for (int stride = kBestSplitThreads / 2; stride > 0; stride >>= 1) {
+      if (tid < stride && BetterDeviceSplit(shared[tid + stride], shared[tid])) {
+        shared[tid] = shared[tid + stride];
+      }
+      __syncthreads();
+    }
+    if (tid == 0) {
+      top_results[rank] = shared[0];
+      selected_features[rank] = shared[0].valid ? shared[0].feature : -1;
+    }
+    __syncthreads();
+  }
+}
+
 }  // namespace
 
 void LaunchRDNA2BestSplitKernel(const RDNA2BestSplitEngine::FeatureMeta* feature_meta,
@@ -227,9 +269,10 @@ void LaunchRDNA2BestSplitKernel(const RDNA2BestSplitEngine::FeatureMeta* feature
                                  double sum_gradients, double sum_hessians, data_size_t num_data,
                                  double parent_output, double lambda_l1, double lambda_l2,
                                  data_size_t min_data_in_leaf, double min_sum_hessian_in_leaf,
-                                 double min_gain_to_split,
+                                 double min_gain_to_split, int top_k,
                                  RDNA2BestSplitEngine::DeviceSplit* results,
-                                 RDNA2BestSplitEngine::DeviceSplit* best_result, cudaStream_t stream) {
+                                 RDNA2BestSplitEngine::DeviceSplit* best_result,
+                                 RDNA2BestSplitEngine::DeviceSplit* top_results, cudaStream_t stream) {
   const dim3 block(kBestSplitThreads);
   constexpr int kWavesPerBlock = kBestSplitThreads / kWaveSize;
   const dim3 grid(static_cast<unsigned int>((num_features + kWavesPerBlock - 1) / kWavesPerBlock));
@@ -238,7 +281,11 @@ void LaunchRDNA2BestSplitKernel(const RDNA2BestSplitEngine::FeatureMeta* feature
       num_data, parent_output, lambda_l1, lambda_l2, min_data_in_leaf, min_sum_hessian_in_leaf,
       min_gain_to_split, results);
   CUDASUCCESS_OR_FATAL(cudaGetLastError());
-  RDNA2BestSplitReduceKernel<<<1, block, 0, stream>>>(results, num_features, best_result);
+  if (top_k <= 1) {
+    RDNA2BestSplitReduceKernel<<<1, block, 0, stream>>>(results, num_features, best_result);
+  } else {
+    RDNA2BestSplitTopKKernel<<<1, block, 0, stream>>>(results, num_features, top_k, top_results);
+  }
   CUDASUCCESS_OR_FATAL(cudaGetLastError());
 }
 }  // namespace LightGBM
