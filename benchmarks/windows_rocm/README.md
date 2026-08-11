@@ -57,3 +57,15 @@ The build wrapper can build and run the same suites:
 The Google Drive checkout is source-only. All generated state lives under `C:\Temp\LightGBM-RDNA2` by default: CMake/Ninja trees under `build\cpu` and `build\rocm`, benchmark binaries under `benches\bin`, generated datasets under `benches\data`, and models/predictions/logs/matrix summaries under `benches\artifacts`. `build_and_benchmark.ps1 -WorkRoot <path>` overrides the complete external work root. Standalone Python benchmark runs use `LIGHTGBM_RDNA2_TEMP` for the benches root and `LIGHTGBM_RDNA2_BIN` for binaries. The first smoke run can be slower while its 5,000-row validation files are generated; subsequent runs reuse that cache.
 
 Native Windows ROCm currently uses the CLI because the experimental HIP `_lightgbm.dll` still crashes during C-API booster creation with `device_type=cuda`; the CLI executes the same CUDA/HIP training path.
+
+## Dataset-pipeline benchmark
+
+`run_dataset_benchmarks.py` benchmarks split-local raw feature handling without reusing bin boundaries from another split. The pristine upstream v4.7.0 CPU DLL and the fork candidate DLL both receive the same C-contiguous `float32` training matrix through `LGBM_DatasetCreateFromMat`, set labels, and serialize independent datasets. Candidate dataset correctness is isolated by training both serialized datasets with the pristine CPU oracle and applying the normal prediction/tree-structure gate.
+
+Stages are `dataset_create`, `dataset_to_rdna2`, `end_to_train`, and `end_to_end`. `--split-offset` shifts the generated train/validation window while constructing bins from the training slice only, so time-series-style split changes do not share future-derived binning state. Dataset reports include input conversion, dataset construction, label attachment, serialization, and process peak working-set measurements; RDNA2 stages additionally run a one-iteration initialization probe and parse the packed-dataset pack/allocation/H2D components. The probe wall time is explicitly labeled as including that one iteration; the reported logical `end_to_train` total excludes training and binary serialization. `end_to_end` adds the measured boosting time to that logical pre-train path and applies the normal pristine-v4.7 CPU vs RDNA2 prediction/tree correctness gate.
+
+```powershell
+python .\benchmarks\windows_rocm\run_dataset_benchmarks.py --stage dataset_create --profile h64
+python .\benchmarks\windows_rocm\run_dataset_benchmarks.py --stage dataset_to_rdna2 --profile h128 --split-offset 5000
+```
+
