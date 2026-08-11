@@ -23,7 +23,8 @@ __global__ void RDNA2HistogramKernel(
     const int num_groups,
     hist_t* histogram) {
   static_assert(NUM_BANKS == 2 || NUM_BANKS == 4 || NUM_BANKS == 8, "RDNA2 histogram bank count must be a power-of-two tuning point");
-  constexpr int kEntriesPerBank = kFeaturesPerTuple * NUM_BINS * 2;
+  constexpr int kBinsPerBank = kFeaturesPerTuple * NUM_BINS;
+  constexpr int kEntriesPerBank = kBinsPerBank * 2;
   constexpr int kSharedEntries = NUM_BANKS * kEntriesPerBank;
   __shared__ hist_t shared_hist[kSharedEntries];
 
@@ -69,9 +70,10 @@ __global__ void RDNA2HistogramKernel(
           const int group = group_base + feature;
           if (group < num_groups && (active_mask & (1u << feature)) != 0) {
             const uint32_t bin = (packed >> (feature * 8)) & 0xffu;
-            const int base = bank * kEntriesPerBank + ((feature * NUM_BINS + static_cast<int>(bin)) * 2);
-            atomicAdd(shared_hist + base, grad);
-            atomicAdd(shared_hist + base + 1, hess);
+            const int bin_index = feature * NUM_BINS + static_cast<int>(bin);
+            const int bank_base = bank * kEntriesPerBank;
+            atomicAdd(shared_hist + bank_base + bin_index, grad);
+            atomicAdd(shared_hist + bank_base + kBinsPerBank + bin_index, hess);
           }
         }
         if (!has_next) {
@@ -96,9 +98,10 @@ __global__ void RDNA2HistogramKernel(
         const int group = group_base + feature;
         if (group < num_groups && (active_mask & (1u << feature)) != 0) {
           const uint32_t bin = (packed >> (feature * 8)) & 0xffu;
-          const int base = bank * kEntriesPerBank + ((feature * NUM_BINS + static_cast<int>(bin)) * 2);
-          atomicAdd(shared_hist + base, grad);
-          atomicAdd(shared_hist + base + 1, hess);
+          const int bin_index = feature * NUM_BINS + static_cast<int>(bin);
+          const int bank_base = bank * kEntriesPerBank;
+          atomicAdd(shared_hist + bank_base + bin_index, grad);
+          atomicAdd(shared_hist + bank_base + kBinsPerBank + bin_index, hess);
         }
       }
     }
@@ -119,9 +122,10 @@ __global__ void RDNA2HistogramKernel(
         hist_t hess_sum = 0.0;
 #pragma unroll
         for (int reduce_bank = 0; reduce_bank < NUM_BANKS; ++reduce_bank) {
-          const int base = reduce_bank * kEntriesPerBank + ((feature * NUM_BINS + bin) * 2);
-          grad_sum += shared_hist[base];
-          hess_sum += shared_hist[base + 1];
+          const int bin_index = feature * NUM_BINS + bin;
+          const int bank_base = reduce_bank * kEntriesPerBank;
+          grad_sum += shared_hist[bank_base + bin_index];
+          hess_sum += shared_hist[bank_base + kBinsPerBank + bin_index];
         }
         const size_t output = static_cast<size_t>(begin + static_cast<uint32_t>(bin)) * 2;
         histogram[output] = grad_sum;
@@ -145,7 +149,8 @@ __global__ void RDNA2HistogramSuperTileKernel(
     const int num_groups,
     hist_t* histogram) {
   constexpr int kTileFeatures = kFeaturesPerTuple * NUM_TUPLES;
-  constexpr int kEntriesPerBank = kTileFeatures * NUM_BINS * 2;
+  constexpr int kBinsPerBank = kTileFeatures * NUM_BINS;
+  constexpr int kEntriesPerBank = kBinsPerBank * 2;
   constexpr int kSharedEntries = NUM_BANKS * kEntriesPerBank;
   __shared__ hist_t shared_hist[kSharedEntries];
 
@@ -187,9 +192,10 @@ __global__ void RDNA2HistogramSuperTileKernel(
           const int local_feature = (slot + feature_rotation) & (kFeaturesPerTuple - 1);
           const int tile_feature = tuple_offset * kFeaturesPerTuple + local_feature;
           const uint32_t bin = (packed >> (local_feature * 8)) & 0xffu;
-          const int base = bank * kEntriesPerBank + ((tile_feature * NUM_BINS + static_cast<int>(bin)) * 2);
-          atomicAdd(shared_hist + base, grad);
-          atomicAdd(shared_hist + base + 1, hess);
+          const int bin_index = tile_feature * NUM_BINS + static_cast<int>(bin);
+          const int bank_base = bank * kEntriesPerBank;
+          atomicAdd(shared_hist + bank_base + bin_index, grad);
+          atomicAdd(shared_hist + bank_base + kBinsPerBank + bin_index, hess);
         }
       }
     }
@@ -210,9 +216,10 @@ __global__ void RDNA2HistogramSuperTileKernel(
             const int group = group_base + tile_feature;
             if (group < num_groups && (tile_active_mask & (1u << tile_feature)) != 0) {
               const uint32_t bin = (packed >> (local_feature * 8)) & 0xffu;
-              const int base = bank * kEntriesPerBank + ((tile_feature * NUM_BINS + static_cast<int>(bin)) * 2);
-              atomicAdd(shared_hist + base, grad);
-              atomicAdd(shared_hist + base + 1, hess);
+              const int bin_index = tile_feature * NUM_BINS + static_cast<int>(bin);
+              const int bank_base = bank * kEntriesPerBank;
+              atomicAdd(shared_hist + bank_base + bin_index, grad);
+              atomicAdd(shared_hist + bank_base + kBinsPerBank + bin_index, hess);
             }
           }
         }
@@ -235,9 +242,10 @@ __global__ void RDNA2HistogramSuperTileKernel(
         hist_t hess_sum = 0.0;
 #pragma unroll
         for (int reduce_bank = 0; reduce_bank < NUM_BANKS; ++reduce_bank) {
-          const int base = reduce_bank * kEntriesPerBank + ((tile_feature * NUM_BINS + bin) * 2);
-          grad_sum += shared_hist[base];
-          hess_sum += shared_hist[base + 1];
+          const int bin_index = tile_feature * NUM_BINS + bin;
+          const int bank_base = reduce_bank * kEntriesPerBank;
+          grad_sum += shared_hist[bank_base + bin_index];
+          hess_sum += shared_hist[bank_base + kBinsPerBank + bin_index];
         }
         const size_t output = static_cast<size_t>(begin + static_cast<uint32_t>(bin)) * 2;
         histogram[output] = grad_sum;
