@@ -4,7 +4,7 @@ This harness validates and times the same LightGBM training workload through leg
 
 ## Canonical reference
 
-Correctness of the ROCm backend is gated against **LightGBM 4.7 CPU**, because it is the same source version as the HIP backend. The legacy CPU/OpenCL modes remain in every profile as compatibility and performance references, but differences caused by the older LightGBM version do not fail the ROCm correctness gate.
+Correctness of the ROCm backend is gated against a **pristine upstream LightGBM v4.7.0 CPU DLL** built from the official `microsoft/LightGBM` tag `v4.7.0` at commit `8f7036f03627054d5a54a6f965b13f4b9ff2cb63`. The CPU reference is built from a separate external source checkout under the benchmark work root, never from the RDNA2 fork checkout, so fork-side Serial/RDNA2 changes cannot contaminate the oracle. The legacy CPU/OpenCL modes remain compatibility and performance references only.
 
 For binary objectives the gate requires finite, non-constant probabilities in `[0, 1]`, requested tree count, matching tree structure, `allclose` predictions, near-perfect Pearson correlation, AUC agreement, identical hard labels at 0.5, and identical confusion matrix. For L2 regression it requires finite non-constant predictions, requested tree count, matching tree structure, `allclose` predictions, near-perfect correlation, and RMSE agreement.
 

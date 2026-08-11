@@ -21,8 +21,10 @@ $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $BuildRoot = Join-Path $WorkRoot 'build'
 $BenchRoot = Join-Path $WorkRoot 'benches'
 $Bin = Join-Path $BenchRoot 'bin'
-$CpuBuild = Join-Path $BuildRoot 'cpu'
+$Native470Source = Join-Path $WorkRoot 'reference\LightGBM-v4.7.0'
+$CpuBuild = Join-Path $BuildRoot 'native470'
 $RocmBuild = Join-Path $BuildRoot 'rocm'
+$Native470Commit = '8f7036f03627054d5a54a6f965b13f4b9ff2cb63'
 $VcVars = 'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat'
 $Python = 'C:\Program Files\Python313\python.exe'
 
@@ -42,16 +44,33 @@ function Invoke-CmdChecked([string]$Command) {
     if ($LASTEXITCODE -ne 0) { throw "Command failed with exit code $LASTEXITCODE" }
 }
 
-Write-Host '=== Build LightGBM 4.7.0 CPU ==='
+Write-Host '=== Build pristine upstream LightGBM v4.7.0 CPU reference ==='
+$needNativeClone = $true
+if (Test-Path (Join-Path $Native470Source '.git')) {
+    $currentNativeCommit = (& git -C $Native470Source rev-parse HEAD).Trim()
+    $nativeDirty = (& git -C $Native470Source status --porcelain)
+    if ($LASTEXITCODE -eq 0 -and $currentNativeCommit -eq $Native470Commit -and -not $nativeDirty) {
+        $needNativeClone = $false
+    }
+}
+if ($needNativeClone) {
+    Remove-Item -Recurse -Force $Native470Source -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path (Split-Path $Native470Source) | Out-Null
+    & git clone --depth 1 --branch v4.7.0 --recurse-submodules https://github.com/microsoft/LightGBM.git $Native470Source
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to clone pristine upstream LightGBM v4.7.0' }
+}
+$currentNativeCommit = (& git -C $Native470Source rev-parse HEAD).Trim()
+if ($currentNativeCommit -ne $Native470Commit) { throw "Unexpected upstream v4.7.0 commit: $currentNativeCommit" }
 Remove-Item -Recurse -Force $CpuBuild -ErrorAction SilentlyContinue
 $cpuOut = Join-Path $CpuBuild 'out'
-$cpuCommand = "call `"$VcVars`" && cmake -S `"$Repo`" -B `"$CpuBuild`" -G Ninja -DUSE_ROCM=OFF -DUSE_GPU=OFF -DUSE_CUDA=OFF -DBUILD_CLI=ON -DBUILD_STATIC_LIB=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=`"$cpuOut`" -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=`"$cpuOut`" -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY=`"$cpuOut`" && cmake --build `"$CpuBuild`" -j 8"
+$cpuCommand = "call `"$VcVars`" && cmake -S `"$Native470Source`" -B `"$CpuBuild`" -G Ninja -DUSE_GPU=OFF -DUSE_CUDA=OFF -DBUILD_CLI=ON -DBUILD_STATIC_LIB=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=`"$cpuOut`" -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=`"$cpuOut`" -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY=`"$cpuOut`" && cmake --build `"$CpuBuild`" -j 8"
 Invoke-CmdChecked $cpuCommand
 $cpuDll = Join-Path $cpuOut 'lib_lightgbm.dll'
 $cpuExe = Join-Path $cpuOut 'lightgbm.exe'
 if (-not (Test-Path $cpuDll)) { throw "CPU build did not produce $cpuDll" }
-Copy-Item -Force $cpuDll (Join-Path $Bin 'lightgbm_4.7.0_cpu.dll')
-if (Test-Path $cpuExe) { Copy-Item -Force $cpuExe (Join-Path $Bin 'lightgbm_4.7.0_cpu.exe') }
+Copy-Item -Force $cpuDll (Join-Path $Bin 'lightgbm_4.7.0_native_cpu.dll')
+if (Test-Path $cpuExe) { Copy-Item -Force $cpuExe (Join-Path $Bin 'lightgbm_4.7.0_native_cpu.exe') }
+"source=https://github.com/microsoft/LightGBM.git`ntag=v4.7.0`ncommit=$currentNativeCommit" | Set-Content -Encoding ascii (Join-Path $Bin 'lightgbm_4.7.0_native_cpu.source.txt')
 
 Write-Host '=== Build LightGBM 4.7.0 native Windows ROCm/HIP gfx1030 ==='
 Remove-Item -Recurse -Force $RocmBuild -ErrorAction SilentlyContinue

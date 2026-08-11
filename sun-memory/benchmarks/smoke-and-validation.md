@@ -4,7 +4,7 @@ description: Smoke, Optuna-envelope, compatibility, production, and long-horizon
 
 # Smoke and validation
 
-After an RDNA2 histogram/kernel modification, run the smallest correctness gate first: `python .\benchmarks\windows_rocm\run_matrix.py --suite smoke`. The smoke suite uses `h64`, `h128`, `h64_scale16`, and `h128_regression`, compares LightGBM 4.7 CPU against `device_type=rdna2`, trains 6 trees on the full 40k x 3000 training shape, and uses 5000 validation rows. The initial RDNA2 Serial-semantics baseline passes all four with prediction max diff `0` and exact tree text/structure.
+After an RDNA2 histogram/kernel modification, run the smallest correctness gate first: `python .\benchmarks\windows_rocm\run_matrix.py --suite smoke`. The smoke suite uses `h64`, `h128`, `h64_scale16`, and `h128_regression`, compares the pristine upstream LightGBM v4.7.0 CPU DLL (official commit `8f7036f03627054d5a54a6f965b13f4b9ff2cb63`) against `device_type=rdna2`, trains 6 trees on the full 40k x 3000 training shape, and uses 5000 validation rows. The initial RDNA2 Serial-semantics baseline passes all four with prediction max diff `0` and exact tree text/structure.
 
 Use `--suite optuna` after smoke for the production hyperparameter envelope. It runs 20 trees on ten representative profiles spanning depth `2/3/4/5/6/8`, leaves `4/8/16/32/40/120`, max-bin `63/64/127`, all regularization-profile families, learning rates from `0.085` down to `0.02`, and class-weight extremes together with the smoke scale-16 probe. The current RDNA2 path passes every Optuna profile with prediction max diff `0` and exact tree structure.
 

@@ -19,6 +19,7 @@ BIN = Path(os.environ.get("LIGHTGBM_RDNA2_BIN", str(TEMP_ROOT / "bin")))
 DATA = TEMP_ROOT / "data"
 ARTIFACTS = TEMP_ROOT / "artifacts"
 SEED = 20260809
+NATIVE_470_COMMIT = "8f7036f03627054d5a54a6f965b13f4b9ff2cb63"
 
 H64_BASE = {
     "description": "Stage 1-like H64 workload",
@@ -582,7 +583,8 @@ def main() -> int:
     objective_tag = "binary" if profile["objective"] == "binary" else "regression"
     train_binary = DATA / f"train_{objective_tag}_{args.train_rows}x{args.features}_maxbin{profile['max_bin']}.bin"
     required = {
-        "cpu": BIN / "lightgbm_4.7.0_cpu.dll",
+        "cpu": BIN / "lightgbm_4.7.0_native_cpu.dll",
+        "cpu_provenance": BIN / "lightgbm_4.7.0_native_cpu.source.txt",
         "rocm_exe": BIN / "lightgbm_4.7.0_rocm.exe",
     }
     if args.modes == "all":
@@ -590,8 +592,14 @@ def main() -> int:
     missing = [str(v) for v in required.values() if not v.exists()]
     if missing:
         raise RuntimeError("missing benchmark binaries; run build_and_benchmark.ps1 first:\n" + "\n".join(missing))
+    cpu_provenance = required["cpu_provenance"].read_text(encoding="utf-8").strip()
+    if NATIVE_470_COMMIT not in cpu_provenance:
+        raise RuntimeError(
+            "LightGBM 4.7 CPU reference provenance mismatch; expected pristine upstream commit "
+            + NATIVE_470_COMMIT + ", got: " + cpu_provenance
+        )
 
-    # v4.7 CPU is the canonical dataset producer and correctness reference.
+    # Pristine upstream v4.7.0 CPU is the canonical dataset producer and correctness reference.
     ensure_binary_dataset(required["cpu"], train_text, train_binary, int(profile["max_bin"]))
     results = []
     if args.modes == "all":
