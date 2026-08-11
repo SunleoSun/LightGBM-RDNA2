@@ -24,7 +24,7 @@ __global__ void RDNA2HistogramKernel(
     hist_t* histogram) {
   static_assert(NUM_BANKS == 2 || NUM_BANKS == 4 || NUM_BANKS == 8, "RDNA2 histogram bank count must be a power-of-two tuning point");
   constexpr int kBinsPerBank = kFeaturesPerTuple * NUM_BINS;
-  constexpr int kEntriesPerBank = kBinsPerBank * 2;
+  constexpr int kEntriesPerBank = kBinsPerBank * 2 + (NUM_BINS == 128 ? 1 : 0);
   constexpr int kSharedEntries = NUM_BANKS * kEntriesPerBank;
   __shared__ hist_t shared_hist[kSharedEntries];
 
