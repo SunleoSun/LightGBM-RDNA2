@@ -45,6 +45,7 @@ __global__ void RDNA2BestSplitKernel(const RDNA2BestSplitEngine::FeatureMeta* fe
 
   RDNA2BestSplitEngine::DeviceSplit out{};
   out.feature = feature_meta[feature].real_feature;
+  out.inner_feature = feature;
   out.gain = kMinScore;
   out.default_left = 1;
   out.valid = 0;
@@ -261,7 +262,44 @@ __global__ void RDNA2BestSplitTopKKernel(const RDNA2BestSplitEngine::DeviceSplit
   }
 }
 
+__global__ void RDNA2BestSplitGatherKernel(
+    const RDNA2BestSplitEngine::DeviceSplit* top_results, int top_k,
+    const hist_t* histogram, const uint64_t* hist_offsets,
+    const RDNA2BestSplitEngine::FeatureMeta* feature_meta, hist_t* candidate_histograms) {
+  const int candidate_index = static_cast<int>(blockIdx.x);
+  if (candidate_index >= top_k) {
+    return;
+  }
+  const auto candidate = top_results[candidate_index];
+  if (!candidate.valid || candidate.inner_feature < 0) {
+    return;
+  }
+  const int inner_feature = candidate.inner_feature;
+  const auto meta = feature_meta[inner_feature];
+  const size_t histogram_values = static_cast<size_t>(meta.num_bin - meta.offset) * 2;
+  const hist_t* source = histogram + hist_offsets[inner_feature];
+  hist_t* destination = candidate_histograms +
+      static_cast<size_t>(candidate_index) * RDNA2BestSplitEngine::kCandidateHistogramValues;
+  for (size_t index = static_cast<size_t>(threadIdx.x); index < histogram_values; index += blockDim.x) {
+    destination[index] = source[index];
+  }
+}
+
 }  // namespace
+
+void LaunchRDNA2BestSplitGatherKernel(
+    const RDNA2BestSplitEngine::DeviceSplit* top_results, int top_k,
+    const hist_t* histogram, const uint64_t* hist_offsets,
+    const RDNA2BestSplitEngine::FeatureMeta* feature_meta, hist_t* candidate_histograms,
+    cudaStream_t stream) {
+  if (top_k <= 0) {
+    return;
+  }
+  constexpr int kGatherThreads = 256;
+  RDNA2BestSplitGatherKernel<<<top_k, kGatherThreads, 0, stream>>>(
+      top_results, top_k, histogram, hist_offsets, feature_meta, candidate_histograms);
+  CUDASUCCESS_OR_FATAL(cudaGetLastError());
+}
 
 void LaunchRDNA2BestSplitKernel(const RDNA2BestSplitEngine::FeatureMeta* feature_meta,
                                  const uint64_t* hist_offsets, const int8_t* used_features,

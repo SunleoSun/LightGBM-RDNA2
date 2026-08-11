@@ -27,6 +27,7 @@ class RDNA2BestSplitEngine {
 
   struct DeviceSplit {
     int feature;
+    int inner_feature;
     uint32_t threshold;
     data_size_t left_count;
     data_size_t right_count;
@@ -40,6 +41,8 @@ class RDNA2BestSplitEngine {
     uint8_t default_left;
     uint8_t valid;
   };
+
+  static constexpr size_t kCandidateHistogramValues = 256;
 
   RDNA2BestSplitEngine() = default;
   ~RDNA2BestSplitEngine();
@@ -61,11 +64,20 @@ class RDNA2BestSplitEngine {
                         double sum_gradients, double sum_hessians, data_size_t num_data,
                         double parent_output, const SplitInfo& cpu_best, const char* leaf_name);
   bool FindBestDeviceExact(const Config* config, FeatureHistogram* histogram_array,
-                           const hist_t* device_histogram,
-                           const std::vector<int8_t>& is_feature_used,
-                           const std::vector<int8_t>& node_used_features,
-                           double sum_gradients, double sum_hessians, data_size_t num_data,
-                           double parent_output, SplitInfo* exact_result);
+                            const hist_t* device_histogram,
+                            const std::vector<int8_t>& is_feature_used,
+                            const std::vector<int8_t>& node_used_features,
+                            double sum_gradients, double sum_hessians, data_size_t num_data,
+                            double parent_output, SplitInfo* exact_result);
+  bool FindBestDeviceExactPair(const Config* config,
+                               FeatureHistogram* first_histogram_array, const hist_t* first_device_histogram,
+                               double first_sum_gradients, double first_sum_hessians, data_size_t first_num_data,
+                               double first_parent_output, SplitInfo* first_exact_result,
+                               FeatureHistogram* second_histogram_array, const hist_t* second_device_histogram,
+                               double second_sum_gradients, double second_sum_hessians, data_size_t second_num_data,
+                               double second_parent_output, SplitInfo* second_exact_result,
+                               const std::vector<int8_t>& is_feature_used,
+                               const std::vector<int8_t>& node_used_features);
 
  private:
   bool ShadowFindImpl(const Config* config, FeatureHistogram* histogram_array,
@@ -84,6 +96,7 @@ class RDNA2BestSplitEngine {
   std::vector<uint64_t> host_hist_offsets_;
   std::vector<int8_t> host_used_features_;
   std::vector<DeviceSplit> host_top_results_;
+  hist_t* host_candidate_histograms_ = nullptr;
   bool hist_offsets_initialized_ = false;
   bool used_features_initialized_ = false;
   DeviceSplit host_best_result_{};
@@ -94,6 +107,7 @@ class RDNA2BestSplitEngine {
   CUDAVector<DeviceSplit> results_;
   CUDAVector<DeviceSplit> best_result_;
   CUDAVector<DeviceSplit> top_results_;
+  CUDAVector<hist_t> candidate_histograms_;
 #ifdef TIMETAG
   uint64_t profile_calls_ = 0;
   uint64_t profile_raw_feature_match_ = 0;
@@ -117,6 +131,11 @@ void LaunchRDNA2BestSplitKernel(const RDNA2BestSplitEngine::FeatureMeta* feature
                                  RDNA2BestSplitEngine::DeviceSplit* results,
                                  RDNA2BestSplitEngine::DeviceSplit* best_result,
                                  RDNA2BestSplitEngine::DeviceSplit* top_results, cudaStream_t stream);
+void LaunchRDNA2BestSplitGatherKernel(
+    const RDNA2BestSplitEngine::DeviceSplit* top_results, int top_k,
+    const hist_t* histogram, const uint64_t* hist_offsets,
+    const RDNA2BestSplitEngine::FeatureMeta* feature_meta, hist_t* candidate_histograms,
+    cudaStream_t stream);
 
 }  // namespace LightGBM
 

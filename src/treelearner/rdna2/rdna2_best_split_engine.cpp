@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstring>
 
 namespace LightGBM {
 
@@ -27,6 +28,10 @@ RDNA2BestSplitEngine::~RDNA2BestSplitEngine() {
     SynchronizeCUDAStream(stream_, __FILE__, __LINE__);
     CUDASUCCESS_OR_FATAL(cudaStreamDestroy(stream_));
     stream_ = nullptr;
+  }
+  if (host_candidate_histograms_ != nullptr) {
+    CUDASUCCESS_OR_FATAL(cudaFreeHost(host_candidate_histograms_));
+    host_candidate_histograms_ = nullptr;
   }
 }
 
@@ -57,6 +62,11 @@ void RDNA2BestSplitEngine::Init(const Dataset* train_data, int gpu_device_id) {
   host_hist_offsets_.resize(static_cast<size_t>(num_features_));
   host_used_features_.assign(static_cast<size_t>(num_features_), 0);
   host_top_results_.resize(8);
+  if (host_candidate_histograms_ == nullptr) {
+    CUDASUCCESS_OR_FATAL(cudaHostAlloc(reinterpret_cast<void**>(&host_candidate_histograms_),
+                                       8 * kCandidateHistogramValues * sizeof(hist_t),
+                                       cudaHostAllocPortable));
+  }
   hist_offsets_initialized_ = false;
   used_features_initialized_ = false;
   hist_offsets_.Resize(static_cast<size_t>(num_features_));
@@ -65,6 +75,7 @@ void RDNA2BestSplitEngine::Init(const Dataset* train_data, int gpu_device_id) {
   histogram_.Resize(num_total_bins_ * 2);
   best_result_.Resize(1);
   top_results_.Resize(8);
+  candidate_histograms_.Resize(8 * kCandidateHistogramValues);
 }
 
 bool RDNA2BestSplitEngine::ShadowFind(const Config* config, FeatureHistogram* histogram_array,
@@ -100,6 +111,156 @@ bool RDNA2BestSplitEngine::FindBestDeviceExact(const Config* config, FeatureHist
   }
   return ShadowFindImpl(config, histogram_array, device_histogram, false, is_feature_used, node_used_features,
                         sum_gradients, sum_hessians, num_data, parent_output, nullptr, exact_result, "production");
+}
+
+bool RDNA2BestSplitEngine::FindBestDeviceExactPair(
+    const Config* config,
+    FeatureHistogram* first_histogram_array, const hist_t* first_device_histogram,
+    double first_sum_gradients, double first_sum_hessians, data_size_t first_num_data,
+    double first_parent_output, SplitInfo* first_exact_result,
+    FeatureHistogram* second_histogram_array, const hist_t* second_device_histogram,
+    double second_sum_gradients, double second_sum_hessians, data_size_t second_num_data,
+    double second_parent_output, SplitInfo* second_exact_result,
+    const std::vector<int8_t>& is_feature_used,
+    const std::vector<int8_t>& node_used_features) {
+  if (!eligible_ || config == nullptr || first_histogram_array == nullptr || second_histogram_array == nullptr ||
+      first_device_histogram == nullptr || second_device_histogram == nullptr ||
+      first_exact_result == nullptr || second_exact_result == nullptr ||
+      first_num_data <= 0 || second_num_data <= 0 || config->use_quantized_grad || config->extra_trees ||
+      !config->monotone_constraints.empty() || !config->feature_contri.empty() ||
+      config->max_delta_step > 0.0 || config->path_smooth > kEpsilon ||
+      is_feature_used.size() != static_cast<size_t>(num_features_) ||
+      node_used_features.size() != static_cast<size_t>(num_features_)) {
+    return false;
+  }
+
+  hist_t* host_base = first_histogram_array[0].RawData() - kHistOffset;
+  bool upload_offsets = !hist_offsets_initialized_;
+  bool upload_used_features = !used_features_initialized_;
+  for (int feature = 0; feature < num_features_; ++feature) {
+    if (upload_offsets) {
+      const ptrdiff_t offset = first_histogram_array[feature].RawData() - host_base;
+      if (offset < 0 || static_cast<size_t>(offset) >= num_total_bins_ * 2) {
+        return false;
+      }
+      host_hist_offsets_[static_cast<size_t>(feature)] = static_cast<uint64_t>(offset);
+    }
+    const int8_t used = static_cast<int8_t>(
+        is_feature_used[static_cast<size_t>(feature)] != 0 &&
+        node_used_features[static_cast<size_t>(feature)] != 0);
+    if (host_used_features_[static_cast<size_t>(feature)] != used) {
+      host_used_features_[static_cast<size_t>(feature)] = used;
+      upload_used_features = true;
+    }
+  }
+  if (upload_offsets) {
+    CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(hist_offsets_.RawData(), host_hist_offsets_.data(),
+                                         host_hist_offsets_.size() * sizeof(uint64_t),
+                                         cudaMemcpyHostToDevice, stream_));
+    hist_offsets_initialized_ = true;
+  }
+  if (upload_used_features) {
+    CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(used_features_.RawData(), host_used_features_.data(),
+                                         host_used_features_.size() * sizeof(int8_t),
+                                         cudaMemcpyHostToDevice, stream_));
+    used_features_initialized_ = true;
+  }
+
+  constexpr int kExactTopK = 2;
+#ifdef TIMETAG
+  const auto kernel_start = std::chrono::steady_clock::now();
+#endif
+  LaunchRDNA2BestSplitKernel(feature_meta_.RawDataReadOnly(), hist_offsets_.RawDataReadOnly(),
+                             used_features_.RawDataReadOnly(), num_features_, first_device_histogram,
+                             first_sum_gradients, first_sum_hessians, first_num_data, first_parent_output,
+                             config->lambda_l1, config->lambda_l2, config->min_data_in_leaf,
+                             config->min_sum_hessian_in_leaf, config->min_gain_to_split, kExactTopK,
+                             results_.RawData(), best_result_.RawData(), top_results_.RawData(), stream_);
+  LaunchRDNA2BestSplitGatherKernel(
+      top_results_.RawDataReadOnly(), kExactTopK, first_device_histogram, hist_offsets_.RawDataReadOnly(),
+      feature_meta_.RawDataReadOnly(), candidate_histograms_.RawData(), stream_);
+  LaunchRDNA2BestSplitKernel(feature_meta_.RawDataReadOnly(), hist_offsets_.RawDataReadOnly(),
+                             used_features_.RawDataReadOnly(), num_features_, second_device_histogram,
+                             second_sum_gradients, second_sum_hessians, second_num_data, second_parent_output,
+                             config->lambda_l1, config->lambda_l2, config->min_data_in_leaf,
+                             config->min_sum_hessian_in_leaf, config->min_gain_to_split, kExactTopK,
+                             results_.RawData(), best_result_.RawData(), top_results_.RawData() + kExactTopK, stream_);
+  LaunchRDNA2BestSplitGatherKernel(
+      top_results_.RawDataReadOnly() + kExactTopK, kExactTopK, second_device_histogram,
+      hist_offsets_.RawDataReadOnly(), feature_meta_.RawDataReadOnly(),
+      candidate_histograms_.RawData() + kExactTopK * kCandidateHistogramValues, stream_);
+  CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(host_top_results_.data(), top_results_.RawDataReadOnly(),
+                                       2 * kExactTopK * sizeof(DeviceSplit),
+                                       cudaMemcpyDeviceToHost, stream_));
+  CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(host_candidate_histograms_, candidate_histograms_.RawDataReadOnly(),
+                                       2 * kExactTopK * kCandidateHistogramValues * sizeof(hist_t),
+                                       cudaMemcpyDeviceToHost, stream_));
+  SynchronizeCUDAStream(stream_, __FILE__, __LINE__);
+#ifdef TIMETAG
+  const auto kernel_end = std::chrono::steady_clock::now();
+  profile_kernel_ms_ += std::chrono::duration<double, std::milli>(kernel_end - kernel_start).count();
+  profile_calls_ += 2;
+  const auto finalize_start = std::chrono::steady_clock::now();
+#endif
+
+  std::vector<int> first_features;
+  std::vector<int> second_features;
+  first_features.reserve(kExactTopK);
+  second_features.reserve(kExactTopK);
+  auto materialize_histograms = [&](FeatureHistogram* histogram_array, int result_offset,
+                                    std::vector<int>* inner_features) {
+    for (int candidate_index = 0; candidate_index < kExactTopK; ++candidate_index) {
+      const int slot = result_offset + candidate_index;
+      const DeviceSplit& candidate = host_top_results_[static_cast<size_t>(slot)];
+      if (!candidate.valid || candidate.inner_feature < 0) {
+        continue;
+      }
+      const int inner_feature = candidate.inner_feature;
+      inner_features->push_back(inner_feature);
+      const auto& meta = host_feature_meta_[static_cast<size_t>(inner_feature)];
+      const size_t hist_values = static_cast<size_t>(meta.num_bin - meta.offset) * 2;
+      std::memcpy(histogram_array[inner_feature].RawData(),
+                  host_candidate_histograms_ + static_cast<size_t>(slot) * kCandidateHistogramValues,
+                  hist_values * sizeof(hist_t));
+    }
+  };
+  materialize_histograms(first_histogram_array, 0, &first_features);
+  materialize_histograms(second_histogram_array, kExactTopK, &second_features);
+
+  auto finalize_leaf = [&](FeatureHistogram* histogram_array, const std::vector<int>& inner_features,
+                           double sum_gradients, double sum_hessians, data_size_t num_data,
+                           double parent_output, SplitInfo* exact_result) {
+    SplitInfo finalized;
+    std::vector<uint8_t> was_finalized(static_cast<size_t>(num_features_), 0);
+    for (int inner_feature : inner_features) {
+      was_finalized[static_cast<size_t>(inner_feature)] = 1;
+      train_data_->FixHistogram(inner_feature, sum_gradients, sum_hessians,
+                                histogram_array[inner_feature].RawData());
+      SplitInfo candidate_split;
+      histogram_array[inner_feature].FindBestThreshold(
+          sum_gradients, sum_hessians, num_data, nullptr, parent_output, &candidate_split);
+      candidate_split.feature = train_data_->RealFeatureIndex(inner_feature);
+      if (candidate_split > finalized) {
+        finalized = candidate_split;
+      }
+    }
+    for (int feature = 0; feature < num_features_; ++feature) {
+      if (host_used_features_[static_cast<size_t>(feature)] != 0 &&
+          was_finalized[static_cast<size_t>(feature)] == 0) {
+        histogram_array[feature].set_is_splittable(true);
+      }
+    }
+    *exact_result = finalized;
+  };
+  finalize_leaf(first_histogram_array, first_features, first_sum_gradients, first_sum_hessians,
+                first_num_data, first_parent_output, first_exact_result);
+  finalize_leaf(second_histogram_array, second_features, second_sum_gradients, second_sum_hessians,
+                second_num_data, second_parent_output, second_exact_result);
+#ifdef TIMETAG
+  const auto finalize_end = std::chrono::steady_clock::now();
+  profile_finalize_ms_ += std::chrono::duration<double, std::milli>(finalize_end - finalize_start).count();
+#endif
+  return true;
 }
 
 bool RDNA2BestSplitEngine::ShadowFindImpl(const Config* config, FeatureHistogram* histogram_array,

@@ -168,29 +168,35 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
     }
 
     const std::vector<int8_t> node_used_features(static_cast<size_t>(num_features_), 1);
-    SplitInfo smaller_best;
-    if (!best_split_engine_.FindBestDeviceExact(
-            config_, smaller_leaf_histogram_array_,
-            histogram_engine_.best_split_pool_histogram(smaller_leaf), is_feature_used, node_used_features,
-            smaller_leaf_splits_->sum_gradients(), smaller_leaf_splits_->sum_hessians(),
-            smaller_leaf_splits_->num_data_in_leaf(), GetParentOutput(tree, smaller_leaf_splits_.get()),
-            &smaller_best)) {
-      return false;
-    }
-    best_split_per_leaf_[smaller_leaf] = smaller_best;
-
     if (has_larger) {
       const int larger_leaf = larger_leaf_splits_->leaf_index();
+      SplitInfo smaller_best;
       SplitInfo larger_best;
-      if (!best_split_engine_.FindBestDeviceExact(
-              config_, larger_leaf_histogram_array_,
-              histogram_engine_.best_split_pool_histogram(larger_leaf), is_feature_used, node_used_features,
+      if (!best_split_engine_.FindBestDeviceExactPair(
+              config_, smaller_leaf_histogram_array_,
+              histogram_engine_.best_split_pool_histogram(smaller_leaf),
+              smaller_leaf_splits_->sum_gradients(), smaller_leaf_splits_->sum_hessians(),
+              smaller_leaf_splits_->num_data_in_leaf(), GetParentOutput(tree, smaller_leaf_splits_.get()),
+              &smaller_best, larger_leaf_histogram_array_,
+              histogram_engine_.best_split_pool_histogram(larger_leaf),
               larger_leaf_splits_->sum_gradients(), larger_leaf_splits_->sum_hessians(),
               larger_leaf_splits_->num_data_in_leaf(), GetParentOutput(tree, larger_leaf_splits_.get()),
-              &larger_best)) {
+              &larger_best, is_feature_used, node_used_features)) {
         return false;
       }
+      best_split_per_leaf_[smaller_leaf] = smaller_best;
       best_split_per_leaf_[larger_leaf] = larger_best;
+    } else {
+      SplitInfo smaller_best;
+      if (!best_split_engine_.FindBestDeviceExact(
+              config_, smaller_leaf_histogram_array_,
+              histogram_engine_.best_split_pool_histogram(smaller_leaf), is_feature_used, node_used_features,
+              smaller_leaf_splits_->sum_gradients(), smaller_leaf_splits_->sum_hessians(),
+              smaller_leaf_splits_->num_data_in_leaf(), GetParentOutput(tree, smaller_leaf_splits_.get()),
+              &smaller_best)) {
+        return false;
+      }
+      best_split_per_leaf_[smaller_leaf] = smaller_best;
     }
     return true;
   }
