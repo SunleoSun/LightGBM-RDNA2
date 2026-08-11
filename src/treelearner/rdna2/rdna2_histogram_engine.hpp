@@ -59,6 +59,11 @@ class RDNA2HistogramEngine {
       host_histogram_staging_ = nullptr;
       host_histogram_staging_size_ = 0;
     }
+    if (host_feature4_masks_ != nullptr) {
+      CUDASUCCESS_OR_FATAL(cudaFreeHost(host_feature4_masks_));
+      host_feature4_masks_ = nullptr;
+      host_feature4_masks_size_ = 0;
+    }
   }
 
   void Init(const Dataset* train_data, int gpu_device_id, int max_leaves) {
@@ -200,11 +205,19 @@ class RDNA2HistogramEngine {
       }
     }
 
+    if (host_feature4_masks_size_ != num_feature4_) {
+      if (host_feature4_masks_ != nullptr) {
+        CUDASUCCESS_OR_FATAL(cudaFreeHost(host_feature4_masks_));
+        host_feature4_masks_ = nullptr;
+      }
+      CUDASUCCESS_OR_FATAL(cudaHostAlloc(reinterpret_cast<void**>(&host_feature4_masks_),
+                                         num_feature4_ * sizeof(uint8_t), cudaHostAllocPortable));
+      host_feature4_masks_size_ = num_feature4_;
+    }
+    feature4_masks_.Resize(num_feature4_);
     const auto packed_ready = std::chrono::steady_clock::now();
     packed_features_.Resize(host_packed.size());
     group_bin_offsets_.InitFromHostVector(host_group_bin_offsets);
-    host_feature4_masks_.resize(num_feature4_);
-    feature4_masks_.Resize(num_feature4_);
     gradients_.Resize(static_cast<size_t>(num_data_));
     hessians_.Resize(static_cast<size_t>(num_data_));
     data_indices_.Resize(static_cast<size_t>(num_data_));
@@ -360,7 +373,8 @@ class RDNA2HistogramEngine {
   std::vector<int> dense_feature_groups_;
   std::vector<int> dense_feature_num_bins_;
   std::vector<int> host_group_feature_indices_;
-  std::vector<uint8_t> host_feature4_masks_;
+  uint8_t* host_feature4_masks_ = nullptr;
+  size_t host_feature4_masks_size_ = 0;
   CUDAVector<PackedFeature4> packed_features_;
   CUDAVector<uint32_t> group_bin_offsets_;
   CUDAVector<uint8_t> feature4_masks_;

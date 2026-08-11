@@ -328,8 +328,8 @@ bool RDNA2HistogramEngine::ConstructHistogram(
     }
     host_feature4_masks_[tuple] = mask;
   }
-  CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(feature4_masks_.RawData(), host_feature4_masks_.data(),
-                                       host_feature4_masks_.size() * sizeof(uint8_t),
+  CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(feature4_masks_.RawData(), host_feature4_masks_,
+                                       host_feature4_masks_size_ * sizeof(uint8_t),
                                        cudaMemcpyHostToDevice, stream()));
 
   const data_size_t* device_indices = nullptr;
