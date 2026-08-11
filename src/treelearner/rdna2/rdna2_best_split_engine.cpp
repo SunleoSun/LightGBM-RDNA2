@@ -104,13 +104,17 @@ bool RDNA2BestSplitEngine::FindBestDeviceExact(const Config* config, FeatureHist
                                                 const hist_t* device_histogram,
                                                 const std::vector<int8_t>& is_feature_used,
                                                 const std::vector<int8_t>& node_used_features,
-                                                double sum_gradients, double sum_hessians, data_size_t num_data,
-                                                double parent_output, SplitInfo* exact_result) {
+                                                 double sum_gradients, double sum_hessians, data_size_t num_data,
+                                                 double parent_output, cudaEvent_t histogram_ready_event,
+                                                 SplitInfo* exact_result) {
   if (device_histogram == nullptr || exact_result == nullptr) {
     return false;
   }
+  if (histogram_ready_event != nullptr) {
+    CUDASUCCESS_OR_FATAL(cudaStreamWaitEvent(stream_, histogram_ready_event, 0));
+  }
   return ShadowFindImpl(config, histogram_array, device_histogram, false, is_feature_used, node_used_features,
-                        sum_gradients, sum_hessians, num_data, parent_output, nullptr, exact_result, "production");
+                         sum_gradients, sum_hessians, num_data, parent_output, nullptr, exact_result, "production");
 }
 
 bool RDNA2BestSplitEngine::FindBestDeviceExactPair(
@@ -122,7 +126,8 @@ bool RDNA2BestSplitEngine::FindBestDeviceExactPair(
     double second_sum_gradients, double second_sum_hessians, data_size_t second_num_data,
     double second_parent_output, SplitInfo* second_exact_result,
     const std::vector<int8_t>& is_feature_used,
-    const std::vector<int8_t>& node_used_features) {
+    const std::vector<int8_t>& node_used_features,
+    cudaEvent_t histogram_ready_event) {
   if (!eligible_ || config == nullptr || first_histogram_array == nullptr || second_histogram_array == nullptr ||
       first_device_histogram == nullptr || second_device_histogram == nullptr ||
       first_exact_result == nullptr || second_exact_result == nullptr ||
@@ -132,6 +137,9 @@ bool RDNA2BestSplitEngine::FindBestDeviceExactPair(
       is_feature_used.size() != static_cast<size_t>(num_features_) ||
       node_used_features.size() != static_cast<size_t>(num_features_)) {
     return false;
+  }
+  if (histogram_ready_event != nullptr) {
+    CUDASUCCESS_OR_FATAL(cudaStreamWaitEvent(stream_, histogram_ready_event, 0));
   }
 
   hist_t* host_base = first_histogram_array[0].RawData() - kHistOffset;

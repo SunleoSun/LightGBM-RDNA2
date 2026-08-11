@@ -181,7 +181,7 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
               histogram_engine_.best_split_pool_histogram(larger_leaf),
               larger_leaf_splits_->sum_gradients(), larger_leaf_splits_->sum_hessians(),
               larger_leaf_splits_->num_data_in_leaf(), GetParentOutput(tree, larger_leaf_splits_.get()),
-              &larger_best, is_feature_used, node_used_features)) {
+              &larger_best, is_feature_used, node_used_features, histogram_engine_.best_split_ready_event())) {
         return false;
       }
       best_split_per_leaf_[smaller_leaf] = smaller_best;
@@ -193,7 +193,7 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
               histogram_engine_.best_split_pool_histogram(smaller_leaf), is_feature_used, node_used_features,
               smaller_leaf_splits_->sum_gradients(), smaller_leaf_splits_->sum_hessians(),
               smaller_leaf_splits_->num_data_in_leaf(), GetParentOutput(tree, smaller_leaf_splits_.get()),
-              &smaller_best)) {
+              histogram_engine_.best_split_ready_event(), &smaller_best)) {
         return false;
       }
       best_split_per_leaf_[smaller_leaf] = smaller_best;

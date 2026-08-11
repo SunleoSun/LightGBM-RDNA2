@@ -46,6 +46,10 @@ class RDNA2HistogramEngine {
       CUDASUCCESS_OR_FATAL(cudaHostUnregister(ptr));
     }
     registered_histogram_buffers_.clear();
+    if (best_split_ready_event_ != nullptr) {
+      CUDASUCCESS_OR_FATAL(cudaEventDestroy(best_split_ready_event_));
+      best_split_ready_event_ = nullptr;
+    }
     if (stream_ != nullptr) {
       CUDASUCCESS_OR_FATAL(cudaStreamDestroy(stream_));
       stream_ = nullptr;
@@ -68,6 +72,9 @@ class RDNA2HistogramEngine {
     }
     if (stream_ == nullptr) {
       CUDASUCCESS_OR_FATAL(cudaStreamCreate(&stream_));
+    }
+    if (best_split_ready_event_ == nullptr) {
+      CUDASUCCESS_OR_FATAL(cudaEventCreateWithFlags(&best_split_ready_event_, cudaEventDisableTiming));
     }
 
     train_data_ = train_data;
@@ -223,7 +230,7 @@ class RDNA2HistogramEngine {
                           int larger_leaf, bool use_subtract, bool prefer_device_only);
 
   bool best_split_pool_enabled() const { return best_split_pool_max_leaves_ > 0; }
-
+  cudaEvent_t best_split_ready_event() const { return best_split_ready_event_; }
   bool best_split_pool_histogram_valid(int leaf) const {
     return leaf >= 0 && leaf < best_split_pool_max_leaves_ &&
            best_split_pool_valid_[static_cast<size_t>(leaf)] != 0;
@@ -368,6 +375,7 @@ class RDNA2HistogramEngine {
   hist_t* host_histogram_staging_ = nullptr;
   size_t host_histogram_staging_size_ = 0;
   cudaStream_t stream_ = nullptr;
+  cudaEvent_t best_split_ready_event_ = nullptr;
   std::unordered_set<hist_t*> registered_histogram_buffers_;
   const data_size_t* registered_data_indices_ = nullptr;
   size_t registered_data_indices_count_ = 0;

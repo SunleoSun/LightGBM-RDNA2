@@ -67,17 +67,18 @@ class RDNA2BestSplitEngine {
                             const hist_t* device_histogram,
                             const std::vector<int8_t>& is_feature_used,
                             const std::vector<int8_t>& node_used_features,
-                            double sum_gradients, double sum_hessians, data_size_t num_data,
-                            double parent_output, SplitInfo* exact_result);
+                             double sum_gradients, double sum_hessians, data_size_t num_data,
+                             double parent_output, cudaEvent_t histogram_ready_event, SplitInfo* exact_result);
   bool FindBestDeviceExactPair(const Config* config,
                                FeatureHistogram* first_histogram_array, const hist_t* first_device_histogram,
                                double first_sum_gradients, double first_sum_hessians, data_size_t first_num_data,
                                double first_parent_output, SplitInfo* first_exact_result,
                                FeatureHistogram* second_histogram_array, const hist_t* second_device_histogram,
                                double second_sum_gradients, double second_sum_hessians, data_size_t second_num_data,
-                               double second_parent_output, SplitInfo* second_exact_result,
-                               const std::vector<int8_t>& is_feature_used,
-                               const std::vector<int8_t>& node_used_features);
+                                double second_parent_output, SplitInfo* second_exact_result,
+                                const std::vector<int8_t>& is_feature_used,
+                                const std::vector<int8_t>& node_used_features,
+                                cudaEvent_t histogram_ready_event);
 
  private:
   bool ShadowFindImpl(const Config* config, FeatureHistogram* histogram_array,

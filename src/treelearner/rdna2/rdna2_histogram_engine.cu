@@ -453,7 +453,11 @@ bool RDNA2HistogramEngine::ConstructHistogram(
       }
     }
   }
-  SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
+  if (can_keep_device_only) {
+    CUDASUCCESS_OR_FATAL(cudaEventRecord(best_split_ready_event_, stream()));
+  } else {
+    SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
+  }
 #ifdef TIMETAG
   auto stage_end = std::chrono::steady_clock::now();
   kernel_ms = std::chrono::duration<double, std::milli>(stage_end - stage_start).count();
