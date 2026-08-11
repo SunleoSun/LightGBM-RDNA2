@@ -220,7 +220,9 @@ class RDNA2HistogramEngine {
 
   bool ConstructHistogram(const std::vector<int8_t>& is_feature_used, const data_size_t* data_indices,
                           data_size_t num_data, hist_t* host_histogram, int smaller_leaf,
-                          int larger_leaf, bool use_subtract);
+                          int larger_leaf, bool use_subtract, bool prefer_device_only);
+
+  bool best_split_pool_enabled() const { return best_split_pool_max_leaves_ > 0; }
 
   bool best_split_pool_histogram_valid(int leaf) const {
     return leaf >= 0 && leaf < best_split_pool_max_leaves_ &&

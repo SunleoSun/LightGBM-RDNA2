@@ -186,6 +186,17 @@ bool RDNA2BestSplitEngine::ShadowFindImpl(const Config* config, FeatureHistogram
   if (gpu_valid) {
     finalized_inner_feature = train_data_->InnerFeatureIndex(gpu_best->feature);
     if (finalized_inner_feature >= 0) {
+      if (exact_result != nullptr && !copy_host_histogram) {
+        const auto& meta = host_feature_meta_[static_cast<size_t>(finalized_inner_feature)];
+        const size_t hist_values = static_cast<size_t>(meta.num_bin - meta.offset) * 2;
+        CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(
+            histogram_array[finalized_inner_feature].RawData(),
+            device_histogram + host_hist_offsets_[static_cast<size_t>(finalized_inner_feature)],
+            hist_values * sizeof(hist_t), cudaMemcpyDeviceToHost, stream_));
+        SynchronizeCUDAStream(stream_, __FILE__, __LINE__);
+        train_data_->FixHistogram(finalized_inner_feature, sum_gradients, sum_hessians,
+                                  histogram_array[finalized_inner_feature].RawData());
+      }
       histogram_array[finalized_inner_feature].FindBestThreshold(
           sum_gradients, sum_hessians, num_data, nullptr, parent_output, &finalized);
       finalized.feature = gpu_best->feature;

@@ -260,12 +260,16 @@ __global__ void RDNA2HistogramSuperTileKernel(
   }
 }
 
-__global__ void RDNA2SubtractHistogramKernel(const hist_t* parent_histogram,
-                                             const hist_t* smaller_histogram,
-                                             hist_t* larger_histogram, size_t num_values) {
+__global__ void RDNA2SplitHistogramPoolKernel(const hist_t* parent_histogram,
+                                              const hist_t* current_histogram,
+                                              hist_t* smaller_histogram,
+                                              hist_t* larger_histogram, size_t num_values) {
   const size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index < num_values) {
-    larger_histogram[index] = parent_histogram[index] - smaller_histogram[index];
+    const hist_t parent = parent_histogram[index];
+    const hist_t current = current_histogram[index];
+    larger_histogram[index] = parent - current;
+    smaller_histogram[index] = current;
   }
 }
 
@@ -296,7 +300,8 @@ void RDNA2HistogramEngine::BeforeTrain(const score_t* gradients, const score_t* 
 
 bool RDNA2HistogramEngine::ConstructHistogram(
     const std::vector<int8_t>& is_feature_used, const data_size_t* data_indices,
-    data_size_t num_data, hist_t* host_histogram, int smaller_leaf, int larger_leaf, bool use_subtract) {
+    data_size_t num_data, hist_t* host_histogram, int smaller_leaf, int larger_leaf, bool use_subtract,
+    bool prefer_device_only) {
   if ((!h64_eligible_ && !h128_eligible_) || host_histogram == nullptr || num_data <= 0 ||
       is_feature_used.size() != static_cast<size_t>(num_features_)) {
     return false;
@@ -357,10 +362,18 @@ bool RDNA2HistogramEngine::ConstructHistogram(
   auto stage_start = std::chrono::steady_clock::now();
 #endif
 
-  hist_t* mapped_histogram = EnsureCanonicalHistogramMapped(host_histogram);
+  const int parent_leaf = larger_leaf >= 0 ? std::min(smaller_leaf, larger_leaf) : -1;
+  const bool can_keep_device_only = prefer_device_only && !h64_eligible_ && h128_eligible_ &&
+      best_split_pool_max_leaves_ > 0 && smaller_leaf >= 0 && smaller_leaf < best_split_pool_max_leaves_ &&
+      (larger_leaf < 0 || (use_subtract && larger_leaf < best_split_pool_max_leaves_ &&
+       parent_leaf >= 0 && best_split_pool_valid_[static_cast<size_t>(parent_leaf)] != 0));
+  if (prefer_device_only) {
+    CHECK(can_keep_device_only);
+  }
+  hist_t* mapped_histogram = can_keep_device_only ? nullptr : EnsureCanonicalHistogramMapped(host_histogram);
   hist_t* kernel_histogram = mapped_histogram != nullptr ? mapped_histogram : device_histogram();
   hist_t* mirror_histogram = nullptr;
-  if (!h64_eligible_ && h128_eligible_ && mapped_histogram != nullptr) {
+  if (!can_keep_device_only && !h64_eligible_ && h128_eligible_ && mapped_histogram != nullptr) {
     mirror_histogram = device_histogram();
   }
   const int num_groups = static_cast<int>(dense_feature_groups_.size());
@@ -424,17 +437,14 @@ bool RDNA2HistogramEngine::ConstructHistogram(
                                            cudaMemcpyDeviceToDevice, stream()));
       best_split_pool_valid_[static_cast<size_t>(smaller_leaf)] = 1;
     } else if (use_subtract && larger_leaf < best_split_pool_max_leaves_) {
-      const int parent_leaf = std::min(smaller_leaf, larger_leaf);
-      if (best_split_pool_valid_[static_cast<size_t>(parent_leaf)] != 0) {
+      if (parent_leaf >= 0 && best_split_pool_valid_[static_cast<size_t>(parent_leaf)] != 0) {
         const hist_t* parent_slot = pool_base + static_cast<size_t>(parent_leaf) * histogram_values;
         hist_t* larger_slot = pool_base + static_cast<size_t>(larger_leaf) * histogram_values;
         constexpr int kSubtractThreads = 256;
         const int subtract_blocks = static_cast<int>((histogram_values + kSubtractThreads - 1) / kSubtractThreads);
-        RDNA2SubtractHistogramKernel<<<subtract_blocks, kSubtractThreads, 0, stream()>>>(
-            parent_slot, device_histogram(), larger_slot, histogram_values);
+        RDNA2SplitHistogramPoolKernel<<<subtract_blocks, kSubtractThreads, 0, stream()>>>(
+            parent_slot, device_histogram(), smaller_slot, larger_slot, histogram_values);
         CUDASUCCESS_OR_FATAL(cudaGetLastError());
-        CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(smaller_slot, device_histogram(), histogram_bytes,
-                                             cudaMemcpyDeviceToDevice, stream()));
         best_split_pool_valid_[static_cast<size_t>(smaller_leaf)] = 1;
         best_split_pool_valid_[static_cast<size_t>(larger_leaf)] = 1;
       } else {
@@ -450,7 +460,7 @@ bool RDNA2HistogramEngine::ConstructHistogram(
   stage_start = std::chrono::steady_clock::now();
 #endif
   double host_copy_ms = 0.0;
-  if (mapped_histogram == nullptr) {
+  if (mapped_histogram == nullptr && !can_keep_device_only) {
     CopyFromCUDADeviceToHostAsync(host_histogram_staging(), device_histogram(), num_total_bins_ * 2,
                                   stream(), __FILE__, __LINE__);
     SynchronizeCUDAStream(stream(), __FILE__, __LINE__);

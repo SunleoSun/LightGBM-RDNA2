@@ -81,7 +81,7 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
                                                 smaller_leaf_splits_->num_data_in_leaf(),
                                                 ptr_smaller_leaf_hist_data, smaller_leaf_splits_->leaf_index(),
                                                 larger_leaf_splits_ == nullptr ? -1 : larger_leaf_splits_->leaf_index(),
-                                                use_subtract)) {
+                                                use_subtract, UseRDNA2ExactBestSplit())) {
 #ifdef TIMETAG
         ++profile_rdna2_histogram_calls_;
 #endif
@@ -134,13 +134,22 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
 #endif
   }
 
+  bool UseRDNA2ExactBestSplit() const {
+#ifdef TIMETAG
+    return false;
+#else
+    return !config_->use_quantized_grad && histogram_engine_.h128_eligible() &&
+        !histogram_engine_.h64_eligible() && histogram_engine_.best_split_pool_enabled() &&
+        best_split_engine_.eligible() && cegb_ == nullptr && config_->feature_fraction >= 1.0 &&
+        config_->feature_fraction_bynode >= 1.0 && config_->interaction_constraints.empty() &&
+        !config_->extra_trees && config_->monotone_constraints.empty() && config_->feature_contri.empty() &&
+        config_->max_delta_step <= 0.0 && config_->path_smooth <= kEpsilon;
+#endif
+  }
+
   bool TryFindBestSplitsRDNA2Exact(const std::vector<int8_t>& is_feature_used, bool use_subtract,
                                    const Tree* tree) {
-    if (config_->use_quantized_grad || !histogram_engine_.h128_eligible() ||
-        histogram_engine_.h64_eligible() || !best_split_engine_.eligible() || cegb_ != nullptr ||
-        config_->feature_fraction_bynode < 1.0 || !config_->interaction_constraints.empty() ||
-        config_->extra_trees || !config_->monotone_constraints.empty() || !config_->feature_contri.empty() ||
-        config_->max_delta_step > 0.0 || config_->path_smooth > kEpsilon) {
+    if (!UseRDNA2ExactBestSplit()) {
       return false;
     }
     if (smaller_leaf_splits_ == nullptr || smaller_leaf_splits_->leaf_index() < 0) {
@@ -157,24 +166,6 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
     if (has_larger && !histogram_engine_.best_split_pool_histogram_valid(larger_leaf_splits_->leaf_index())) {
       return false;
     }
-
-    OMP_INIT_EX();
-#pragma omp parallel for schedule(static) num_threads(share_state_->num_threads)
-    for (int feature_index = 0; feature_index < num_features_; ++feature_index) {
-      OMP_LOOP_EX_BEGIN();
-      if (!is_feature_used[feature_index]) {
-        continue;
-      }
-      train_data_->FixHistogram(feature_index, smaller_leaf_splits_->sum_gradients(),
-                                smaller_leaf_splits_->sum_hessians(),
-                                smaller_leaf_histogram_array_[feature_index].RawData());
-      if (has_larger) {
-        larger_leaf_histogram_array_[feature_index].Subtract<false>(
-            smaller_leaf_histogram_array_[feature_index]);
-      }
-      OMP_LOOP_EX_END();
-    }
-    OMP_THROW_EX();
 
     const std::vector<int8_t> node_used_features(static_cast<size_t>(num_features_), 1);
     SplitInfo smaller_best;
