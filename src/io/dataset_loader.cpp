@@ -17,7 +17,6 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
-#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -867,18 +866,10 @@ Dataset* DatasetLoader::ConstructFromDenseFloat32(
       }
       raw_num_per_col[feature] = static_cast<int>(finite_values.size()) + nan_count;
       StableRadixSortFloat(&finite_values);
-      std::vector<double> sorted_values;
-      sorted_values.reserve(raw_num_per_col[feature]);
-      for (float value : finite_values) {
-        sorted_values.emplace_back(static_cast<double>(value));
-      }
-      for (int i = 0; i < nan_count; ++i) {
-        sorted_values.emplace_back(std::numeric_limits<double>::quiet_NaN());
-      }
-      bin_mappers[feature]->FindBinFromSortedValues(
-          sorted_values.data(), static_cast<int>(sorted_values.size()), sample_indices.size(),
-          max_bin, config_.min_data_in_bin, filter_cnt, config_.feature_pre_filter,
-          bin_type, config_.use_missing, config_.zero_as_missing,
+      bin_mappers[feature]->FindBinFromSortedFloat32(
+          finite_values.data(), static_cast<int>(finite_values.size()), nan_count,
+          sample_indices.size(), max_bin, config_.min_data_in_bin, filter_cnt,
+          config_.feature_pre_filter, config_.use_missing, config_.zero_as_missing,
           forced_bin_bounds[feature]);
     } else {
       std::vector<double> values;

@@ -202,8 +202,9 @@ class BinMapper {
   void FindBin(double* values, int num_values, size_t total_sample_cnt, int max_bin, int min_data_in_bin, int min_split_data, bool pre_filter, BinType bin_type,
                bool use_missing, bool zero_as_missing, const std::vector<double>& forced_upper_bounds);
 
-  void FindBinFromSortedValues(double* values, int num_values, size_t total_sample_cnt, int max_bin, int min_data_in_bin, int min_split_data, bool pre_filter, BinType bin_type,
-                               bool use_missing, bool zero_as_missing, const std::vector<double>& forced_upper_bounds);
+  void FindBinFromSortedFloat32(const float* values, int num_values, int nan_count, size_t total_sample_cnt,
+                                int max_bin, int min_data_in_bin, int min_split_data, bool pre_filter,
+                                bool use_missing, bool zero_as_missing, const std::vector<double>& forced_upper_bounds);
 
   /*!
   * \brief Serializing this object to buffer
@@ -237,8 +238,9 @@ class BinMapper {
   }
 
  private:
-  void FindBinInternal(double* values, int num_values, size_t total_sample_cnt, int max_bin, int min_data_in_bin, int min_split_data, bool pre_filter, BinType bin_type,
-                       bool use_missing, bool zero_as_missing, const std::vector<double>& forced_upper_bounds, bool values_are_sorted);
+  void FinishFindBinFromDistinctValues(const std::vector<double>& distinct_values, const std::vector<int>& counts,
+                                       int na_cnt, size_t total_sample_cnt, int max_bin, int min_data_in_bin,
+                                       int min_split_data, bool pre_filter, const std::vector<double>& forced_upper_bounds);
 
   /*! \brief Number of bins */
   int num_bin_;

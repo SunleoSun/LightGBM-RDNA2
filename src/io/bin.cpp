@@ -317,23 +317,6 @@ void BinMapper::FindBin(double* values, int num_sample_values, size_t total_samp
                         int max_bin, int min_data_in_bin, int min_split_data, bool pre_filter, BinType bin_type,
                         bool use_missing, bool zero_as_missing,
                         const std::vector<double>& forced_upper_bounds) {
-  FindBinInternal(values, num_sample_values, total_sample_cnt, max_bin, min_data_in_bin, min_split_data,
-                  pre_filter, bin_type, use_missing, zero_as_missing, forced_upper_bounds, false);
-}
-
-void BinMapper::FindBinFromSortedValues(double* values, int num_sample_values, size_t total_sample_cnt,
-                                        int max_bin, int min_data_in_bin, int min_split_data, bool pre_filter, BinType bin_type,
-                                        bool use_missing, bool zero_as_missing,
-                                        const std::vector<double>& forced_upper_bounds) {
-  FindBinInternal(values, num_sample_values, total_sample_cnt, max_bin, min_data_in_bin, min_split_data,
-                  pre_filter, bin_type, use_missing, zero_as_missing, forced_upper_bounds, true);
-}
-
-void BinMapper::FindBinInternal(double* values, int num_sample_values, size_t total_sample_cnt,
-                                int max_bin, int min_data_in_bin, int min_split_data, bool pre_filter, BinType bin_type,
-                                bool use_missing, bool zero_as_missing,
-                                const std::vector<double>& forced_upper_bounds,
-                                bool values_are_sorted) {
   int na_cnt = 0;
   int non_na_cnt = 0;
   for (int i = 0; i < num_sample_values; ++i) {
@@ -345,38 +328,29 @@ void BinMapper::FindBinInternal(double* values, int num_sample_values, size_t to
     missing_type_ = MissingType::None;
   } else if (zero_as_missing) {
     missing_type_ = MissingType::Zero;
+  } else if (non_na_cnt == num_sample_values) {
+    missing_type_ = MissingType::None;
   } else {
-    if (non_na_cnt == num_sample_values) {
-      missing_type_ = MissingType::None;
-    } else {
-      missing_type_ = MissingType::NaN;
-      na_cnt = num_sample_values - non_na_cnt;
-    }
+    missing_type_ = MissingType::NaN;
+    na_cnt = num_sample_values - non_na_cnt;
   }
   num_sample_values = non_na_cnt;
 
   bin_type_ = bin_type;
   default_bin_ = 0;
-  int zero_cnt = static_cast<int>(total_sample_cnt - num_sample_values - na_cnt);
-  // find distinct_values first
+  const int zero_cnt = static_cast<int>(total_sample_cnt - num_sample_values - na_cnt);
   std::vector<double> distinct_values;
-  std::vector<int> counts;  // count of data points for each distinct feature value.
+  std::vector<int> counts;
+  std::stable_sort(values, values + num_sample_values);
 
-  if (!values_are_sorted) {
-    std::stable_sort(values, values + num_sample_values);
-  }
-
-  // push zero in the front
   if (num_sample_values == 0 || (values[0] > 0.0f && zero_cnt > 0)) {
     distinct_values.push_back(0.0f);
     counts.push_back(zero_cnt);
   }
-
   if (num_sample_values > 0) {
     distinct_values.push_back(values[0]);
     counts.push_back(1);
   }
-
   for (int i = 1; i < num_sample_values; ++i) {
     if (!Common::CheckDoubleEqualOrdered(values[i - 1], values[i])) {
       if (values[i - 1] < 0.0f && values[i] > 0.0f) {
@@ -386,21 +360,86 @@ void BinMapper::FindBinInternal(double* values, int num_sample_values, size_t to
       distinct_values.push_back(values[i]);
       counts.push_back(1);
     } else {
-      // use the large value
       distinct_values.back() = values[i];
       ++counts.back();
     }
   }
-
-  // push zero in the back
   if (num_sample_values > 0 && values[num_sample_values - 1] < 0.0f && zero_cnt > 0) {
     distinct_values.push_back(0.0f);
     counts.push_back(zero_cnt);
   }
+  FinishFindBinFromDistinctValues(distinct_values, counts, na_cnt, total_sample_cnt, max_bin,
+                                  min_data_in_bin, min_split_data, pre_filter, forced_upper_bounds);
+}
+
+void BinMapper::FindBinFromSortedFloat32(const float* values, int num_sample_values, int nan_count,
+                                         size_t total_sample_cnt, int max_bin, int min_data_in_bin,
+                                         int min_split_data, bool pre_filter, bool use_missing,
+                                         bool zero_as_missing, const std::vector<double>& forced_upper_bounds) {
+  CHECK_GE(num_sample_values, 0);
+  CHECK_GE(nan_count, 0);
+  CHECK_LE(static_cast<size_t>(num_sample_values + nan_count), total_sample_cnt);
+
+  int na_cnt = 0;
+  if (!use_missing) {
+    missing_type_ = MissingType::None;
+  } else if (zero_as_missing) {
+    missing_type_ = MissingType::Zero;
+  } else if (nan_count == 0) {
+    missing_type_ = MissingType::None;
+  } else {
+    missing_type_ = MissingType::NaN;
+    na_cnt = nan_count;
+  }
+
+  bin_type_ = BinType::NumericalBin;
+  default_bin_ = 0;
+  const int zero_cnt = static_cast<int>(total_sample_cnt - num_sample_values - na_cnt);
+  std::vector<double> distinct_values;
+  std::vector<int> counts;
+  distinct_values.reserve(static_cast<size_t>(num_sample_values) + 1);
+  counts.reserve(static_cast<size_t>(num_sample_values) + 1);
+
+  if (num_sample_values == 0 || (values[0] > 0.0f && zero_cnt > 0)) {
+    distinct_values.push_back(0.0f);
+    counts.push_back(zero_cnt);
+  }
+  if (num_sample_values > 0) {
+    distinct_values.push_back(static_cast<double>(values[0]));
+    counts.push_back(1);
+  }
+  for (int i = 1; i < num_sample_values; ++i) {
+    const double previous = static_cast<double>(values[i - 1]);
+    const double current = static_cast<double>(values[i]);
+    if (!Common::CheckDoubleEqualOrdered(previous, current)) {
+      if (previous < 0.0f && current > 0.0f) {
+        distinct_values.push_back(0.0f);
+        counts.push_back(zero_cnt);
+      }
+      distinct_values.push_back(current);
+      counts.push_back(1);
+    } else {
+      distinct_values.back() = current;
+      ++counts.back();
+    }
+  }
+  if (num_sample_values > 0 && values[num_sample_values - 1] < 0.0f && zero_cnt > 0) {
+    distinct_values.push_back(0.0f);
+    counts.push_back(zero_cnt);
+  }
+  FinishFindBinFromDistinctValues(distinct_values, counts, na_cnt, total_sample_cnt, max_bin,
+                                  min_data_in_bin, min_split_data, pre_filter, forced_upper_bounds);
+}
+
+void BinMapper::FinishFindBinFromDistinctValues(const std::vector<double>& distinct_values,
+                                                const std::vector<int>& counts, int na_cnt,
+                                                size_t total_sample_cnt, int max_bin, int min_data_in_bin,
+                                                int min_split_data, bool pre_filter,
+                                                const std::vector<double>& forced_upper_bounds) {
   min_val_ = distinct_values.front();
   max_val_ = distinct_values.back();
-  std::vector<int> cnt_in_bin;  // count of data points in each bin.
-  int num_distinct_values = static_cast<int>(distinct_values.size());
+  std::vector<int> cnt_in_bin;
+  const int num_distinct_values = static_cast<int>(distinct_values.size());
   if (bin_type_ == BinType::NumericalBin) {
     if (missing_type_ == MissingType::Zero) {
       bin_upper_bound_ = FindBinWithZeroAsOneBin(distinct_values.data(), counts.data(), num_distinct_values, max_bin, total_sample_cnt,
@@ -417,51 +456,44 @@ void BinMapper::FindBinInternal(double* values, int num_sample_values, size_t to
       bin_upper_bound_.push_back(NaN);
     }
     num_bin_ = static_cast<int>(bin_upper_bound_.size());
-    {
-      cnt_in_bin.resize(num_bin_, 0);
-      int i_bin = 0;
-      for (int i = 0; i < num_distinct_values; ++i) {
-        while (distinct_values[i] > bin_upper_bound_[i_bin] && i_bin < num_bin_ - 1) {
-          ++i_bin;
-        }
-        cnt_in_bin[i_bin] += counts[i];
+    cnt_in_bin.resize(num_bin_, 0);
+    int i_bin = 0;
+    for (int i = 0; i < num_distinct_values; ++i) {
+      while (distinct_values[i] > bin_upper_bound_[i_bin] && i_bin < num_bin_ - 1) {
+        ++i_bin;
       }
-      if (missing_type_ == MissingType::NaN) {
-        cnt_in_bin[num_bin_ - 1] = na_cnt;
-      }
+      cnt_in_bin[i_bin] += counts[i];
+    }
+    if (missing_type_ == MissingType::NaN) {
+      cnt_in_bin[num_bin_ - 1] = na_cnt;
     }
     CHECK_LE(num_bin_, max_bin);
   } else {
-    // convert to int type first
     std::vector<int> distinct_values_int;
     std::vector<int> counts_int;
     for (size_t i = 0; i < distinct_values.size(); ++i) {
-      int val = static_cast<int>(distinct_values[i]);
+      const int val = static_cast<int>(distinct_values[i]);
       if (val < 0) {
         na_cnt += counts[i];
         Log::Warning("Met negative value in categorical features, will convert it to NaN");
+      } else if (distinct_values_int.empty() || val != distinct_values_int.back()) {
+        distinct_values_int.push_back(val);
+        counts_int.push_back(counts[i]);
       } else {
-        if (distinct_values_int.empty() || val != distinct_values_int.back()) {
-          distinct_values_int.push_back(val);
-          counts_int.push_back(counts[i]);
-        } else {
-          counts_int.back() += counts[i];
-        }
+        counts_int.back() += counts[i];
       }
     }
-    int rest_cnt = static_cast<int>(total_sample_cnt - na_cnt);
+    const int rest_cnt = static_cast<int>(total_sample_cnt - na_cnt);
     if (rest_cnt > 0) {
       const int SPARSE_RATIO = 100;
       if (distinct_values_int.back() / SPARSE_RATIO > static_cast<int>(distinct_values_int.size())) {
         Log::Warning("Met categorical feature which contains sparse values. "
-                      "Consider renumbering to consecutive integers started from zero");
+                     "Consider renumbering to consecutive integers started from zero");
       }
-      // sort by counts in descending order
       Common::SortForPair<int, int>(&counts_int, &distinct_values_int, 0, true);
-      // will ignore the categorical of small counts
-      int cut_cnt = static_cast<int>(
+      const int cut_cnt = static_cast<int>(
           Common::RoundInt((total_sample_cnt - na_cnt) * 0.99f));
-      size_t cur_cat_idx = 0;  // index of current category.
+      size_t cur_cat_idx = 0;
       categorical_2_bin_.clear();
       bin_2_categorical_.clear();
       int used_cnt = 0;
@@ -471,14 +503,12 @@ void BinMapper::FindBinInternal(double* values, int num_sample_values, size_t to
       }
       max_bin = std::min(distinct_cnt, max_bin);
       cnt_in_bin.clear();
-
-      // Push the dummy bin for NaN
       bin_2_categorical_.push_back(-1);
       categorical_2_bin_[-1] = 0;
       cnt_in_bin.push_back(0);
       num_bin_ = 1;
-      while (cur_cat_idx < distinct_values_int.size()
-              && (used_cnt < cut_cnt || num_bin_ < max_bin)) {
+      while (cur_cat_idx < distinct_values_int.size() &&
+             (used_cnt < cut_cnt || num_bin_ < max_bin)) {
         if (counts_int[cur_cat_idx] < min_data_in_bin && cur_cat_idx > 1) {
           break;
         }
@@ -489,41 +519,30 @@ void BinMapper::FindBinInternal(double* values, int num_sample_values, size_t to
         ++num_bin_;
         ++cur_cat_idx;
       }
-      // Use MissingType::None to represent this bin contains all categoricals
       if (cur_cat_idx == distinct_values_int.size() && na_cnt == 0) {
         missing_type_ = MissingType::None;
       } else {
         missing_type_ = MissingType::NaN;
       }
-      // fix count of NaN bin
       cnt_in_bin[0] = static_cast<int>(total_sample_cnt - used_cnt);
     }
   }
 
-  // check trivial(num_bin_ == 1) feature
-  if (num_bin_ <= 1) {
-    is_trivial_ = true;
-  } else {
-    is_trivial_ = false;
-  }
-  // check useless bin
-  if (!is_trivial_ && pre_filter && NeedFilter(cnt_in_bin, static_cast<int>(total_sample_cnt), min_split_data, bin_type_)) {
+  is_trivial_ = num_bin_ <= 1;
+  if (!is_trivial_ && pre_filter &&
+      NeedFilter(cnt_in_bin, static_cast<int>(total_sample_cnt), min_split_data, bin_type_)) {
     is_trivial_ = true;
   }
 
   if (!is_trivial_) {
     default_bin_ = ValueToBin(0);
-    most_freq_bin_ =
-        static_cast<uint32_t>(ArrayArgs<int>::ArgMax(cnt_in_bin));
+    most_freq_bin_ = static_cast<uint32_t>(ArrayArgs<int>::ArgMax(cnt_in_bin));
     const double max_sparse_rate =
         static_cast<double>(cnt_in_bin[most_freq_bin_]) / total_sample_cnt;
-    // When most_freq_bin_ != default_bin_, there are some additional data loading costs.
-    // so use most_freq_bin_ = default_bin_ when there is not so sparse
     if (most_freq_bin_ != default_bin_ && max_sparse_rate < kSparseThreshold) {
       most_freq_bin_ = default_bin_;
     }
-    sparse_rate_ =
-        static_cast<double>(cnt_in_bin[most_freq_bin_]) / total_sample_cnt;
+    sparse_rate_ = static_cast<double>(cnt_in_bin[most_freq_bin_]) / total_sample_cnt;
   } else {
     sparse_rate_ = 1.0f;
   }
