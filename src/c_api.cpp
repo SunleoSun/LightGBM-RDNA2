@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -1343,6 +1344,9 @@ int LGBM_DatasetCreateFromMats(int32_t nmat,
   config.Set(param);
   OMP_SET_NUM_THREADS(config.num_threads);
   std::unique_ptr<Dataset> ret;
+#ifdef USE_CUDA
+  std::future<bool> rdna2_dataset_prepare;
+#endif
   int32_t total_nrow = 0;
   for (int j = 0; j < nmat; ++j) {
     total_nrow += nrow[j];
@@ -1363,6 +1367,14 @@ int LGBM_DatasetCreateFromMats(int32_t nmat,
         Network::num_machines() == 1;
     DatasetLoader loader(config, nullptr, 1, nullptr);
     if (dense_row_major_float32) {
+#ifdef USE_CUDA
+      if (config.device_type == std::string("rdna2") &&
+          LightGBM::RDNA2DenseFloat32DatasetPopulationNeedsPrepare(nrow[0], ncol)) {
+        rdna2_dataset_prepare = std::async(
+            std::launch::async, LightGBM::RDNA2PrepareDenseFloat32DatasetPopulation,
+            nrow[0], ncol, config.gpu_device_id);
+      }
+#endif
       ret.reset(loader.ConstructFromDenseFloat32(
           reinterpret_cast<const float*>(data[0]), nrow[0], ncol, sample_indices));
     } else {
@@ -1406,6 +1418,9 @@ int LGBM_DatasetCreateFromMats(int32_t nmat,
       nmat == 1 && data_type == C_API_DTYPE_FLOAT32 && is_row_major[0] != 0;
   bool populated_on_rdna2 = false;
 #ifdef USE_CUDA
+  if (rdna2_dataset_prepare.valid()) {
+    rdna2_dataset_prepare.get();
+  }
   if (dense_row_major_float32 && config.device_type == std::string("rdna2")) {
     populated_on_rdna2 = LightGBM::RDNA2PopulateDenseFloat32Dataset(
         ret.get(), reinterpret_cast<const float*>(data[0]), nrow[0], ncol, config.gpu_device_id);

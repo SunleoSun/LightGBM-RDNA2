@@ -178,6 +178,43 @@ RDNA2DatasetPopulationContext& PopulationContext() {
 
 }  // namespace
 
+bool RDNA2DenseFloat32DatasetPopulationNeedsPrepare(int num_rows, int num_cols) {
+  const int chunk_rows = ChooseChunkRows(num_rows, num_cols);
+  if (chunk_rows <= 0) {
+    return false;
+  }
+  const size_t chunk_elems = static_cast<size_t>(chunk_rows) * num_cols;
+  auto& context = PopulationContext();
+  std::lock_guard<std::mutex> lock(context.mutex_);
+  return context.stream_ == nullptr ||
+         context.input_capacity_ < chunk_elems ||
+         context.output_capacity_ < chunk_elems ||
+         context.bounds_capacity_ < static_cast<size_t>(num_cols) * kMaxBins ||
+         context.feature_capacity_ < static_cast<size_t>(num_cols);
+}
+
+bool RDNA2PrepareDenseFloat32DatasetPopulation(int num_rows, int num_cols, int gpu_device_id) {
+  const int chunk_rows = ChooseChunkRows(num_rows, num_cols);
+  if (chunk_rows <= 0) {
+    return false;
+  }
+  const int device = gpu_device_id < 0 ? 0 : gpu_device_id;
+  SetCUDADevice(device, __FILE__, __LINE__);
+  cudaDeviceProp prop{};
+  CUDASUCCESS_OR_FATAL(cudaGetDeviceProperties(&prop, device));
+  if (std::strncmp(prop.gcnArchName, "gfx1030", 7) != 0) {
+    return false;
+  }
+
+  const size_t chunk_elems = static_cast<size_t>(chunk_rows) * num_cols;
+  auto& context = PopulationContext();
+  std::lock_guard<std::mutex> lock(context.mutex_);
+  context.Ensure(chunk_elems, chunk_elems,
+                 static_cast<size_t>(num_cols) * kMaxBins,
+                 static_cast<size_t>(num_cols));
+  return true;
+}
+
 bool RDNA2PopulateDenseFloat32Dataset(Dataset* dataset, const float* data,
                                       int num_rows, int num_cols,
                                       int gpu_device_id) {
