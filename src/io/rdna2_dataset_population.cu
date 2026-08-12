@@ -9,6 +9,7 @@
 #include <LightGBM/utils/log.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -23,8 +24,9 @@ constexpr int kFeatureTile = 8;
 constexpr int kRowTile = 32;
 constexpr int kThreads = kFeatureTile * kRowTile;
 constexpr int kMaxBins = 128;
-constexpr size_t kMaxInputChunkBytes = 128ull * 1024ull * 1024ull;
-constexpr int kMaxChunkRows = 8192;
+constexpr int kPopulationPipelineSlots = 2;
+constexpr size_t kMaxInputChunkBytes = 64ull * 1024ull * 1024ull;
+constexpr int kMaxChunkRows = 4096;
 
 __global__ void RDNA2PopulateDenseBinsKernel(
     const float* input, uint8_t* output, const double* upper_bounds,
@@ -94,25 +96,31 @@ class RDNA2DatasetPopulationContext {
   ~RDNA2DatasetPopulationContext() { Release(); }
 
   void Ensure(size_t input_elems, size_t output_elems, size_t bounds_elems, size_t feature_count) {
-    if (stream_ == nullptr) {
-      CUDASUCCESS_OR_FATAL(cudaStreamCreate(&stream_));
+    for (int slot = 0; slot < kPopulationPipelineSlots; ++slot) {
+      if (streams_[slot] == nullptr) {
+        CUDASUCCESS_OR_FATAL(cudaStreamCreate(&streams_[slot]));
+      }
     }
     if (input_elems > input_capacity_) {
-      if (host_input_ != nullptr) CUDASUCCESS_OR_FATAL(cudaFreeHost(host_input_));
-      if (device_input_ != nullptr) CUDASUCCESS_OR_FATAL(cudaFree(device_input_));
-      CUDASUCCESS_OR_FATAL(cudaHostAlloc(reinterpret_cast<void**>(&host_input_),
-                                         input_elems * sizeof(float), cudaHostAllocPortable));
-      CUDASUCCESS_OR_FATAL(cudaMalloc(reinterpret_cast<void**>(&device_input_),
-                                      input_elems * sizeof(float)));
+      for (int slot = 0; slot < kPopulationPipelineSlots; ++slot) {
+        if (host_inputs_[slot] != nullptr) CUDASUCCESS_OR_FATAL(cudaFreeHost(host_inputs_[slot]));
+        if (device_inputs_[slot] != nullptr) CUDASUCCESS_OR_FATAL(cudaFree(device_inputs_[slot]));
+        CUDASUCCESS_OR_FATAL(cudaHostAlloc(reinterpret_cast<void**>(&host_inputs_[slot]),
+                                           input_elems * sizeof(float), cudaHostAllocPortable));
+        CUDASUCCESS_OR_FATAL(cudaMalloc(reinterpret_cast<void**>(&device_inputs_[slot]),
+                                        input_elems * sizeof(float)));
+      }
       input_capacity_ = input_elems;
     }
     if (output_elems > output_capacity_) {
-      if (host_output_ != nullptr) CUDASUCCESS_OR_FATAL(cudaFreeHost(host_output_));
-      if (device_output_ != nullptr) CUDASUCCESS_OR_FATAL(cudaFree(device_output_));
-      CUDASUCCESS_OR_FATAL(cudaHostAlloc(reinterpret_cast<void**>(&host_output_),
-                                         output_elems * sizeof(uint8_t), cudaHostAllocPortable));
-      CUDASUCCESS_OR_FATAL(cudaMalloc(reinterpret_cast<void**>(&device_output_),
-                                      output_elems * sizeof(uint8_t)));
+      for (int slot = 0; slot < kPopulationPipelineSlots; ++slot) {
+        if (host_outputs_[slot] != nullptr) CUDASUCCESS_OR_FATAL(cudaFreeHost(host_outputs_[slot]));
+        if (device_outputs_[slot] != nullptr) CUDASUCCESS_OR_FATAL(cudaFree(device_outputs_[slot]));
+        CUDASUCCESS_OR_FATAL(cudaHostAlloc(reinterpret_cast<void**>(&host_outputs_[slot]),
+                                           output_elems * sizeof(uint8_t), cudaHostAllocPortable));
+        CUDASUCCESS_OR_FATAL(cudaMalloc(reinterpret_cast<void**>(&device_outputs_[slot]),
+                                        output_elems * sizeof(uint8_t)));
+      }
       output_capacity_ = output_elems;
     }
     if (bounds_elems > bounds_capacity_) {
@@ -133,20 +141,24 @@ class RDNA2DatasetPopulationContext {
   }
 
   void Release() {
-    if (stream_ != nullptr) { cudaStreamSynchronize(stream_); }
+    for (int slot = 0; slot < kPopulationPipelineSlots; ++slot) {
+      if (streams_[slot] != nullptr) { cudaStreamSynchronize(streams_[slot]); }
+    }
     if (device_missing_nan_ != nullptr) cudaFree(device_missing_nan_);
     if (device_num_bins_ != nullptr) cudaFree(device_num_bins_);
     if (device_upper_bounds_ != nullptr) cudaFree(device_upper_bounds_);
-    if (device_output_ != nullptr) cudaFree(device_output_);
-    if (device_input_ != nullptr) cudaFree(device_input_);
-    if (host_output_ != nullptr) cudaFreeHost(host_output_);
-    if (host_input_ != nullptr) cudaFreeHost(host_input_);
-    if (stream_ != nullptr) cudaStreamDestroy(stream_);
-    stream_ = nullptr;
-    host_input_ = nullptr;
-    host_output_ = nullptr;
-    device_input_ = nullptr;
-    device_output_ = nullptr;
+    for (int slot = 0; slot < kPopulationPipelineSlots; ++slot) {
+      if (device_outputs_[slot] != nullptr) cudaFree(device_outputs_[slot]);
+      if (device_inputs_[slot] != nullptr) cudaFree(device_inputs_[slot]);
+      if (host_outputs_[slot] != nullptr) cudaFreeHost(host_outputs_[slot]);
+      if (host_inputs_[slot] != nullptr) cudaFreeHost(host_inputs_[slot]);
+      if (streams_[slot] != nullptr) cudaStreamDestroy(streams_[slot]);
+      streams_[slot] = nullptr;
+      host_inputs_[slot] = nullptr;
+      host_outputs_[slot] = nullptr;
+      device_inputs_[slot] = nullptr;
+      device_outputs_[slot] = nullptr;
+    }
     device_upper_bounds_ = nullptr;
     device_num_bins_ = nullptr;
     device_missing_nan_ = nullptr;
@@ -157,11 +169,11 @@ class RDNA2DatasetPopulationContext {
   }
 
   std::mutex mutex_;
-  cudaStream_t stream_ = nullptr;
-  float* host_input_ = nullptr;
-  uint8_t* host_output_ = nullptr;
-  float* device_input_ = nullptr;
-  uint8_t* device_output_ = nullptr;
+  std::array<cudaStream_t, kPopulationPipelineSlots> streams_{};
+  std::array<float*, kPopulationPipelineSlots> host_inputs_{};
+  std::array<uint8_t*, kPopulationPipelineSlots> host_outputs_{};
+  std::array<float*, kPopulationPipelineSlots> device_inputs_{};
+  std::array<uint8_t*, kPopulationPipelineSlots> device_outputs_{};
   double* device_upper_bounds_ = nullptr;
   uint16_t* device_num_bins_ = nullptr;
   uint8_t* device_missing_nan_ = nullptr;
@@ -186,7 +198,7 @@ bool RDNA2DenseFloat32DatasetPopulationNeedsPrepare(int num_rows, int num_cols) 
   const size_t chunk_elems = static_cast<size_t>(chunk_rows) * num_cols;
   auto& context = PopulationContext();
   std::lock_guard<std::mutex> lock(context.mutex_);
-  return context.stream_ == nullptr ||
+  return context.streams_[0] == nullptr || context.streams_[1] == nullptr ||
          context.input_capacity_ < chunk_elems ||
          context.output_capacity_ < chunk_elems ||
          context.bounds_capacity_ < static_cast<size_t>(num_cols) * kMaxBins ||
@@ -270,58 +282,85 @@ bool RDNA2PopulateDenseFloat32Dataset(Dataset* dataset, const float* data,
   const double device_check_ms = std::chrono::duration<double, std::milli>(start - metadata_done).count();
   context.Ensure(input_chunk_elems, output_chunk_elems, upper_bounds.size(), num_bins.size());
   CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(context.device_upper_bounds_, upper_bounds.data(),
-                                       upper_bounds.size() * sizeof(double), cudaMemcpyHostToDevice, context.stream_));
+                                       upper_bounds.size() * sizeof(double), cudaMemcpyHostToDevice, context.streams_[0]));
   CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(context.device_num_bins_, num_bins.data(),
-                                       num_bins.size() * sizeof(uint16_t), cudaMemcpyHostToDevice, context.stream_));
+                                       num_bins.size() * sizeof(uint16_t), cudaMemcpyHostToDevice, context.streams_[0]));
   CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(context.device_missing_nan_, missing_nan.data(),
-                                       missing_nan.size() * sizeof(uint8_t), cudaMemcpyHostToDevice, context.stream_));
-  CUDASUCCESS_OR_FATAL(cudaStreamSynchronize(context.stream_));
+                                       missing_nan.size() * sizeof(uint8_t), cudaMemcpyHostToDevice, context.streams_[0]));
+  CUDASUCCESS_OR_FATAL(cudaStreamSynchronize(context.streams_[0]));
 
   const auto setup_done = std::chrono::steady_clock::now();
   double host_stage_ms = 0.0;
-  double gpu_ms = 0.0;
+  double gpu_wait_ms = 0.0;
   double host_load_ms = 0.0;
+  std::array<int, kPopulationPipelineSlots> pending_row_offsets{};
+  std::array<int, kPopulationPipelineSlots> pending_row_counts{};
+  pending_row_offsets.fill(-1);
   const dim3 block(kThreads);
-  for (int row_offset = 0; row_offset < num_rows; row_offset += chunk_rows) {
+
+  auto finish_slot = [&](int slot) {
+    if (pending_row_offsets[slot] < 0) {
+      return true;
+    }
+    const auto wait_begin = std::chrono::steady_clock::now();
+    CUDASUCCESS_OR_FATAL(cudaStreamSynchronize(context.streams_[slot]));
+    const auto wait_end = std::chrono::steady_clock::now();
+    gpu_wait_ms += std::chrono::duration<double, std::milli>(wait_end - wait_begin).count();
+
+    const auto load_begin = std::chrono::steady_clock::now();
+    const bool loaded = dataset->LoadDenseFeatureMajorCanonicalBinRange(
+        context.host_outputs_[slot], num_cols, pending_row_offsets[slot], pending_row_counts[slot]);
+    const auto load_end = std::chrono::steady_clock::now();
+    host_load_ms += std::chrono::duration<double, std::milli>(load_end - load_begin).count();
+    pending_row_offsets[slot] = -1;
+    pending_row_counts[slot] = 0;
+    return loaded;
+  };
+
+  int chunk_index = 0;
+  for (int row_offset = 0; row_offset < num_rows; row_offset += chunk_rows, ++chunk_index) {
+    const int slot = chunk_index % kPopulationPipelineSlots;
+    if (!finish_slot(slot)) {
+      return false;
+    }
+
     const int this_rows = std::min(chunk_rows, num_rows - row_offset);
     const size_t input_bytes = static_cast<size_t>(this_rows) * num_cols * sizeof(float);
     const size_t output_bytes = static_cast<size_t>(this_rows) * num_cols * sizeof(uint8_t);
 
     const auto stage_begin = std::chrono::steady_clock::now();
-    std::memcpy(context.host_input_, data + static_cast<size_t>(row_offset) * num_cols, input_bytes);
+    std::memcpy(context.host_inputs_[slot],
+                data + static_cast<size_t>(row_offset) * num_cols, input_bytes);
     const auto stage_end = std::chrono::steady_clock::now();
     host_stage_ms += std::chrono::duration<double, std::milli>(stage_end - stage_begin).count();
 
-    const auto gpu_begin = std::chrono::steady_clock::now();
-    CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(context.device_input_, context.host_input_, input_bytes,
-                                         cudaMemcpyHostToDevice, context.stream_));
+    CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(context.device_inputs_[slot], context.host_inputs_[slot],
+                                         input_bytes, cudaMemcpyHostToDevice, context.streams_[slot]));
     const dim3 grid((num_cols + kFeatureTile - 1) / kFeatureTile,
                     (this_rows + kRowTile - 1) / kRowTile);
-    RDNA2PopulateDenseBinsKernel<<<grid, block, 0, context.stream_>>>(
-        context.device_input_, context.device_output_, context.device_upper_bounds_,
+    RDNA2PopulateDenseBinsKernel<<<grid, block, 0, context.streams_[slot]>>>(
+        context.device_inputs_[slot], context.device_outputs_[slot], context.device_upper_bounds_,
         context.device_num_bins_, context.device_missing_nan_, this_rows, num_cols);
     CUDASUCCESS_OR_FATAL(cudaGetLastError());
-    CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(context.host_output_, context.device_output_, output_bytes,
-                                         cudaMemcpyDeviceToHost, context.stream_));
-    CUDASUCCESS_OR_FATAL(cudaStreamSynchronize(context.stream_));
-    const auto gpu_end = std::chrono::steady_clock::now();
-    gpu_ms += std::chrono::duration<double, std::milli>(gpu_end - gpu_begin).count();
+    CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(context.host_outputs_[slot], context.device_outputs_[slot],
+                                         output_bytes, cudaMemcpyDeviceToHost, context.streams_[slot]));
+    pending_row_offsets[slot] = row_offset;
+    pending_row_counts[slot] = this_rows;
+  }
 
-    const auto load_begin = std::chrono::steady_clock::now();
-    if (!dataset->LoadDenseFeatureMajorCanonicalBinRange(
-            context.host_output_, num_cols, row_offset, this_rows)) {
+  for (int slot = 0; slot < kPopulationPipelineSlots; ++slot) {
+    if (!finish_slot(slot)) {
       return false;
     }
-    const auto load_end = std::chrono::steady_clock::now();
-    host_load_ms += std::chrono::duration<double, std::milli>(load_end - load_begin).count();
   }
 
   const auto end = std::chrono::steady_clock::now();
   const double setup_ms = std::chrono::duration<double, std::milli>(setup_done - start).count();
   const double total_ms = std::chrono::duration<double, std::milli>(end - start).count();
-  Log::Info("RDNA2 dataset population: rows=%d features=%d chunk_rows=%d chunks=%d metadata=%.3f ms device_check=%.3f ms setup=%.3f ms host_stage=%.3f ms gpu=%.3f ms host_load=%.3f ms total=%.3f ms",
+  Log::Info("RDNA2 dataset population: rows=%d features=%d chunk_rows=%d chunks=%d slots=%d metadata=%.3f ms device_check=%.3f ms setup=%.3f ms host_stage=%.3f ms gpu_wait=%.3f ms host_load=%.3f ms total=%.3f ms",
             num_rows, num_cols, chunk_rows, (num_rows + chunk_rows - 1) / chunk_rows,
-            metadata_ms, device_check_ms, setup_ms, host_stage_ms, gpu_ms, host_load_ms, total_ms);
+            kPopulationPipelineSlots, metadata_ms, device_check_ms, setup_ms, host_stage_ms,
+            gpu_wait_ms, host_load_ms, total_ms);
   return true;
 }
 
