@@ -36,9 +36,11 @@ inline uint32_t FloatSortKey(float value) {
   return (bits & 0x80000000u) != 0 ? ~bits : (bits ^ 0x80000000u);
 }
 
+constexpr int kDenseFloatFeatureBlock = 16;
+
 struct DenseFloatBinWorkspace {
-  std::vector<float> values;
-  std::vector<float> radix_scratch;
+  std::array<std::vector<float>, kDenseFloatFeatureBlock> values;
+  std::array<std::vector<float>, kDenseFloatFeatureBlock> radix_scratch;
 };
 
 void StableRadixSortFloat(std::vector<float>* values, std::vector<float>* scratch) {
@@ -835,86 +837,140 @@ Dataset* DatasetLoader::ConstructFromDenseFloat32(
   std::vector<std::unique_ptr<BinMapper>> bin_mappers(num_col);
   std::vector<int> raw_num_per_col(num_col, 0);
   std::vector<int> fixed_num_per_col(num_col, 0);
+  {
+    OMP_INIT_EX();
+    std::vector<DenseFloatBinWorkspace> dense_float_workspaces(OMP_NUM_THREADS());
+    const int num_feature_blocks =
+        (num_col + kDenseFloatFeatureBlock - 1) / kDenseFloatFeatureBlock;
+    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(guided)
+    for (int block_idx = 0; block_idx < num_feature_blocks; ++block_idx) {
+      OMP_LOOP_EX_BEGIN();
+      const int feature_begin = block_idx * kDenseFloatFeatureBlock;
+      const int feature_end = std::min(feature_begin + kDenseFloatFeatureBlock, num_col);
+      auto& workspace = dense_float_workspaces[omp_get_thread_num()];
+      std::array<int, kDenseFloatFeatureBlock> nan_counts{};
+      std::array<bool, kDenseFloatFeatureBlock> is_numerical{};
+
+      for (int feature = feature_begin; feature < feature_end; ++feature) {
+        const int local_feature = feature - feature_begin;
+        if (ignore_features_.count(feature) > 0 || categorical_features_.count(feature) > 0) {
+          continue;
+        }
+        is_numerical[local_feature] = true;
+        auto& finite_values = workspace.values[local_feature];
+        finite_values.clear();
+        if (finite_values.capacity() < static_cast<size_t>(sample_cnt)) {
+          finite_values.reserve(sample_cnt);
+        }
+      }
+
+      for (int sample_pos = 0; sample_pos < sample_cnt; ++sample_pos) {
+        const float* row =
+            data + static_cast<size_t>(sample_indices[sample_pos]) * num_col + feature_begin;
+        for (int feature = feature_begin; feature < feature_end; ++feature) {
+          const int local_feature = feature - feature_begin;
+          if (!is_numerical[local_feature]) {
+            continue;
+          }
+          const float value = row[local_feature];
+          if (std::isnan(value)) {
+            ++nan_counts[local_feature];
+          } else if (std::fabs(value) > kZeroThreshold) {
+            workspace.values[local_feature].emplace_back(value);
+          }
+        }
+      }
+
+      for (int feature = feature_begin; feature < feature_end; ++feature) {
+        const int local_feature = feature - feature_begin;
+        if (!is_numerical[local_feature]) {
+          continue;
+        }
+        bin_mappers[feature].reset(new BinMapper());
+        const int max_bin = config_.max_bin_by_feature.empty()
+                                ? config_.max_bin
+                                : config_.max_bin_by_feature[feature];
+        auto& finite_values = workspace.values[local_feature];
+        raw_num_per_col[feature] =
+            static_cast<int>(finite_values.size()) + nan_counts[local_feature];
+        StableRadixSortFloat(&finite_values, &workspace.radix_scratch[local_feature]);
+        bin_mappers[feature]->FindBinFromSortedFloat32(
+            finite_values.data(), static_cast<int>(finite_values.size()), nan_counts[local_feature],
+            sample_indices.size(), max_bin, config_.min_data_in_bin, filter_cnt,
+            config_.feature_pre_filter, config_.use_missing, config_.zero_as_missing,
+            forced_bin_bounds[feature]);
+
+        const int most_freq_bin = bin_mappers[feature]->GetMostFreqBin();
+        const bool default_is_most_freq =
+            bin_mappers[feature]->GetDefaultBin() == most_freq_bin;
+        if (default_is_most_freq) {
+          fixed_num_per_col[feature] = raw_num_per_col[feature];
+        } else {
+          int fixed_count = 0;
+          for (int sample_pos = 0; sample_pos < sample_cnt; ++sample_pos) {
+            const float value =
+                data[static_cast<size_t>(sample_indices[sample_pos]) * num_col + feature];
+            const bool explicitly_sampled =
+                std::fabs(value) > kZeroThreshold || std::isnan(value);
+            if (!explicitly_sampled ||
+                bin_mappers[feature]->ValueToBin(static_cast<double>(value)) != most_freq_bin) {
+              ++fixed_count;
+            }
+          }
+          fixed_num_per_col[feature] =
+              fixed_count == 0 ? raw_num_per_col[feature] : fixed_count;
+        }
+      }
+      OMP_LOOP_EX_END();
+    }
+    OMP_THROW_EX();
+  }
 
   OMP_INIT_EX();
-  std::vector<DenseFloatBinWorkspace> dense_float_workspaces(OMP_NUM_THREADS());
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(guided)
   for (int feature = 0; feature < num_col; ++feature) {
     OMP_LOOP_EX_BEGIN();
-    if (ignore_features_.count(feature) > 0) {
+    if (ignore_features_.count(feature) > 0 || categorical_features_.count(feature) == 0) {
       continue;
     }
-    BinType bin_type = BinType::NumericalBin;
-    if (categorical_features_.count(feature)) {
-      bin_type = BinType::CategoricalBin;
-      const bool feat_is_unconstrained =
-          config_.monotone_constraints.empty() || config_.monotone_constraints[feature] == 0;
-      if (!feat_is_unconstrained) {
-        Log::Fatal("The output cannot be monotone with respect to categorical features");
-      }
+    const bool feat_is_unconstrained =
+        config_.monotone_constraints.empty() || config_.monotone_constraints[feature] == 0;
+    if (!feat_is_unconstrained) {
+      Log::Fatal("The output cannot be monotone with respect to categorical features");
     }
-
     bin_mappers[feature].reset(new BinMapper());
     const int max_bin = config_.max_bin_by_feature.empty()
                             ? config_.max_bin
                             : config_.max_bin_by_feature[feature];
-    if (bin_type == BinType::NumericalBin) {
-      auto& workspace = dense_float_workspaces[omp_get_thread_num()];
-      auto& finite_values = workspace.values;
-      finite_values.clear();
-      if (finite_values.capacity() < static_cast<size_t>(sample_cnt)) {
-        finite_values.reserve(sample_cnt);
+    std::vector<double> values;
+    values.reserve(sample_cnt);
+    for (int sample_pos = 0; sample_pos < sample_cnt; ++sample_pos) {
+      const float value = data[static_cast<size_t>(sample_indices[sample_pos]) * num_col + feature];
+      if (std::fabs(value) > kZeroThreshold || std::isnan(value)) {
+        values.emplace_back(static_cast<double>(value));
       }
-      int nan_count = 0;
-      for (int sample_pos = 0; sample_pos < sample_cnt; ++sample_pos) {
-        const float value = data[static_cast<size_t>(sample_indices[sample_pos]) * num_col + feature];
-        if (std::isnan(value)) {
-          ++nan_count;
-        } else if (std::fabs(value) > kZeroThreshold) {
-          finite_values.emplace_back(value);
-        }
-      }
-      raw_num_per_col[feature] = static_cast<int>(finite_values.size()) + nan_count;
-      StableRadixSortFloat(&finite_values, &workspace.radix_scratch);
-      bin_mappers[feature]->FindBinFromSortedFloat32(
-          finite_values.data(), static_cast<int>(finite_values.size()), nan_count,
-          sample_indices.size(), max_bin, config_.min_data_in_bin, filter_cnt,
-          config_.feature_pre_filter, config_.use_missing, config_.zero_as_missing,
-          forced_bin_bounds[feature]);
-    } else {
-      std::vector<double> values;
-      values.reserve(sample_cnt);
-      for (int sample_pos = 0; sample_pos < sample_cnt; ++sample_pos) {
-        const float value = data[static_cast<size_t>(sample_indices[sample_pos]) * num_col + feature];
-        if (std::fabs(value) > kZeroThreshold || std::isnan(value)) {
-          values.emplace_back(static_cast<double>(value));
-        }
-      }
-      raw_num_per_col[feature] = static_cast<int>(values.size());
-      bin_mappers[feature]->FindBin(
-          values.data(), static_cast<int>(values.size()), sample_indices.size(),
-          max_bin, config_.min_data_in_bin, filter_cnt, config_.feature_pre_filter,
-          bin_type, config_.use_missing, config_.zero_as_missing,
-          forced_bin_bounds[feature]);
     }
+    raw_num_per_col[feature] = static_cast<int>(values.size());
+    bin_mappers[feature]->FindBin(
+        values.data(), static_cast<int>(values.size()), sample_indices.size(),
+        max_bin, config_.min_data_in_bin, filter_cnt, config_.feature_pre_filter,
+        BinType::CategoricalBin, config_.use_missing, config_.zero_as_missing,
+        forced_bin_bounds[feature]);
     const int most_freq_bin = bin_mappers[feature]->GetMostFreqBin();
-    const bool default_is_most_freq =
-        bin_mappers[feature]->GetDefaultBin() == most_freq_bin;
+    const bool default_is_most_freq = bin_mappers[feature]->GetDefaultBin() == most_freq_bin;
     if (default_is_most_freq) {
       fixed_num_per_col[feature] = raw_num_per_col[feature];
     } else {
       int fixed_count = 0;
       for (int sample_pos = 0; sample_pos < sample_cnt; ++sample_pos) {
         const float value = data[static_cast<size_t>(sample_indices[sample_pos]) * num_col + feature];
-        const bool explicitly_sampled =
-            std::fabs(value) > kZeroThreshold || std::isnan(value);
+        const bool explicitly_sampled = std::fabs(value) > kZeroThreshold || std::isnan(value);
         if (!explicitly_sampled ||
             bin_mappers[feature]->ValueToBin(static_cast<double>(value)) != most_freq_bin) {
           ++fixed_count;
         }
       }
-      fixed_num_per_col[feature] =
-          fixed_count == 0 ? raw_num_per_col[feature] : fixed_count;
+      fixed_num_per_col[feature] = fixed_count == 0 ? raw_num_per_col[feature] : fixed_count;
     }
     OMP_LOOP_EX_END();
   }
