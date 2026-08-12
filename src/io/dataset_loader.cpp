@@ -36,13 +36,18 @@ inline uint32_t FloatSortKey(float value) {
   return (bits & 0x80000000u) != 0 ? ~bits : (bits ^ 0x80000000u);
 }
 
-void StableRadixSortFloat(std::vector<float>* values) {
-  if (values == nullptr || values->size() < 2) {
+struct DenseFloatBinWorkspace {
+  std::vector<float> values;
+  std::vector<float> radix_scratch;
+};
+
+void StableRadixSortFloat(std::vector<float>* values, std::vector<float>* scratch) {
+  if (values == nullptr || scratch == nullptr || values->size() < 2) {
     return;
   }
-  std::vector<float> scratch(values->size());
+  scratch->resize(values->size());
   float* source = values->data();
-  float* destination = scratch.data();
+  float* destination = scratch->data();
   for (int pass = 0; pass < 4; ++pass) {
     std::array<size_t, 256> counts{};
     const int shift = pass * 8;
@@ -832,6 +837,7 @@ Dataset* DatasetLoader::ConstructFromDenseFloat32(
   std::vector<int> fixed_num_per_col(num_col, 0);
 
   OMP_INIT_EX();
+  std::vector<DenseFloatBinWorkspace> dense_float_workspaces(OMP_NUM_THREADS());
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(guided)
   for (int feature = 0; feature < num_col; ++feature) {
     OMP_LOOP_EX_BEGIN();
@@ -853,8 +859,12 @@ Dataset* DatasetLoader::ConstructFromDenseFloat32(
                             ? config_.max_bin
                             : config_.max_bin_by_feature[feature];
     if (bin_type == BinType::NumericalBin) {
-      std::vector<float> finite_values;
-      finite_values.reserve(sample_cnt);
+      auto& workspace = dense_float_workspaces[omp_get_thread_num()];
+      auto& finite_values = workspace.values;
+      finite_values.clear();
+      if (finite_values.capacity() < static_cast<size_t>(sample_cnt)) {
+        finite_values.reserve(sample_cnt);
+      }
       int nan_count = 0;
       for (int sample_pos = 0; sample_pos < sample_cnt; ++sample_pos) {
         const float value = data[static_cast<size_t>(sample_indices[sample_pos]) * num_col + feature];
@@ -865,7 +875,7 @@ Dataset* DatasetLoader::ConstructFromDenseFloat32(
         }
       }
       raw_num_per_col[feature] = static_cast<int>(finite_values.size()) + nan_count;
-      StableRadixSortFloat(&finite_values);
+      StableRadixSortFloat(&finite_values, &workspace.radix_scratch);
       bin_mappers[feature]->FindBinFromSortedFloat32(
           finite_values.data(), static_cast<int>(finite_values.size()), nan_count,
           sample_indices.size(), max_bin, config_.min_data_in_bin, filter_cnt,
