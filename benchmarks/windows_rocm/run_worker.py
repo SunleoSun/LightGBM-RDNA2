@@ -14,10 +14,41 @@ C_API_PREDICT_NORMAL = 0
 C_API_FEATURE_IMPORTANCE_SPLIT = 0
 
 
+class PROCESS_MEMORY_COUNTERS_EX(C.Structure):
+    _fields_ = [
+        ("cb", C.c_ulong), ("PageFaultCount", C.c_ulong),
+        ("PeakWorkingSetSize", C.c_size_t), ("WorkingSetSize", C.c_size_t),
+        ("QuotaPeakPagedPoolUsage", C.c_size_t), ("QuotaPagedPoolUsage", C.c_size_t),
+        ("QuotaPeakNonPagedPoolUsage", C.c_size_t), ("QuotaNonPagedPoolUsage", C.c_size_t),
+        ("PagefileUsage", C.c_size_t), ("PeakPagefileUsage", C.c_size_t),
+        ("PrivateUsage", C.c_size_t),
+    ]
+
+
+def memory_counters() -> tuple[int, int]:
+    kernel32 = C.WinDLL("kernel32", use_last_error=True)
+    psapi = C.WinDLL("psapi", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = C.c_void_p
+    psapi.GetProcessMemoryInfo.argtypes = [C.c_void_p, C.POINTER(PROCESS_MEMORY_COUNTERS_EX), C.c_ulong]
+    psapi.GetProcessMemoryInfo.restype = C.c_int
+    counters = PROCESS_MEMORY_COUNTERS_EX()
+    counters.cb = C.sizeof(counters)
+    if not psapi.GetProcessMemoryInfo(kernel32.GetCurrentProcess(), C.byref(counters), counters.cb):
+        raise OSError(C.get_last_error(), "GetProcessMemoryInfo failed")
+    return int(counters.WorkingSetSize), int(counters.PeakWorkingSetSize)
+
+
 def rmse_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     y = np.asarray(y_true, dtype=np.float64)
     pred = np.asarray(y_pred, dtype=np.float64)
     return float(np.sqrt(np.mean((pred - y) ** 2)))
+
+
+def quantile_loss_score(y_true: np.ndarray, y_pred: np.ndarray, alpha: float) -> float:
+    y = np.asarray(y_true, dtype=np.float64)
+    pred = np.asarray(y_pred, dtype=np.float64)
+    residual = y - pred
+    return float(np.mean(np.maximum(alpha * residual, (alpha - 1.0) * residual)))
 
 
 def auc_score(y_true: np.ndarray, y_score: np.ndarray) -> float:
@@ -77,11 +108,7 @@ def main() -> int:
     args = p.parse_args()
     profile = json.loads(args.params_json)
 
-    payload = np.load(args.valid_npz)
-    x_valid = np.ascontiguousarray(payload["X"], dtype=np.float32)
-    y_dtype = np.int8 if profile["objective"] == "binary" else np.float64
-    y_valid = np.asarray(payload["y"], dtype=y_dtype)
-
+    baseline_ws, _ = memory_counters()
     lib = C.CDLL(str(Path(args.dll).resolve()))
     bind(lib)
     H = C.c_void_p
@@ -105,6 +132,8 @@ def main() -> int:
     ])
     if profile["objective"] == "binary":
         common += f" scale_pos_weight={profile['scale_pos_weight']}"
+    if profile["objective"] == "quantile":
+        common += f" alpha={profile['alpha']}"
     if args.device == "cpu":
         device_params = "device_type=cpu"
     else:
@@ -129,6 +158,12 @@ def main() -> int:
         model_path = Path(args.model_out).resolve()
         model_path.parent.mkdir(parents=True, exist_ok=True)
         check(lib, lib.LGBM_BoosterSaveModel(booster, 0, args.iterations, C_API_FEATURE_IMPORTANCE_SPLIT, str(model_path).encode()), "BoosterSaveModel")
+        _, training_peak_ws = memory_counters()
+
+        payload = np.load(args.valid_npz)
+        x_valid = np.ascontiguousarray(payload["X"], dtype=np.float32)
+        y_dtype = np.int8 if profile["objective"] == "binary" else np.float64
+        y_valid = np.asarray(payload["y"], dtype=y_dtype)
 
         out_len = C.c_int64()
         preds = np.empty(x_valid.shape[0], dtype=np.float64)
@@ -152,10 +187,18 @@ def main() -> int:
             "init_seconds": init_seconds,
             "train_seconds": train_seconds,
             "predict_seconds": predict_seconds,
+            "end_to_end_seconds": dataset_seconds + init_seconds + train_seconds,
+            "training_peak_working_set_mib": training_peak_ws / (1024.0 * 1024.0),
+            "training_peak_delta_mib": max(0, training_peak_ws - baseline_ws) / (1024.0 * 1024.0),
             "iteration_ms": train_seconds * 1000.0 / args.iterations,
             "objective": profile["objective"],
+            "alpha": profile.get("alpha"),
             "auc": auc_score(y_valid, preds) if profile["objective"] == "binary" else None,
             "rmse": rmse_score(y_valid, preds) if profile["objective"] != "binary" else None,
+            "quantile_loss": (
+                quantile_loss_score(y_valid, preds, float(profile["alpha"]))
+                if profile["objective"] == "quantile" else None
+            ),
             "prediction_min": float(preds.min()),
             "prediction_max": float(preds.max()),
             "prediction_std": float(preds.std()),

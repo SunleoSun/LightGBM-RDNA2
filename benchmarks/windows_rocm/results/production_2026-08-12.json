@@ -1,0 +1,99 @@
+{
+  "date": "2026-08-12",
+  "hardware": {
+    "cpu": "AMD Ryzen 9 5950X",
+    "gpu": "AMD Radeon RX 6800 XT",
+    "gpu_arch": "gfx1030",
+    "rocm": "6.2"
+  },
+  "production_shape": {
+    "train_rows": 40000,
+    "valid_rows": 50000,
+    "features": 3000,
+    "trees": 100
+  },
+  "notes": [
+    "Pristine upstream LightGBM v4.7.0 CPU is the correctness oracle.",
+    "Legacy OpenCL is a compatibility/performance reference, not the correctness oracle.",
+    "training_peak_working_set_mib is peak host process working set and excludes GPU VRAM.",
+    "RDNA2 CLI end_to_end_seconds is the measured training-process wall time including binary Dataset load, learner initialization, and boosting; prediction is measured separately."
+  ],
+  "production": {
+    "h64": {
+      "cpu_v470": {
+        "end_to_end_seconds": 5.47704610001529,
+        "training_peak_working_set_mib": 293.0390625,
+        "train_seconds": 5.30492560000857,
+        "iteration_ms": 53.0492560000857
+      },
+      "opencl_legacy": {
+        "end_to_end_seconds": 2.91514800000004,
+        "training_peak_working_set_mib": 357.01171875,
+        "train_seconds": 1.97657689999323,
+        "iteration_ms": 19.7657689999323
+      },
+      "rdna2": {
+        "end_to_end_seconds": 2.61120630000369,
+        "training_peak_working_set_mib": 498.99609375,
+        "train_seconds": 2.61120630000369,
+        "iteration_ms": 26.1120630000369,
+        "prediction_max_abs_diff_vs_cpu": 0.0,
+        "tree_structure_match": true
+      }
+    },
+    "h128": {
+      "cpu_v470": {
+        "end_to_end_seconds": 8.55100949999178,
+        "training_peak_working_set_mib": 412.23828125,
+        "train_seconds": 8.377078599995,
+        "iteration_ms": 83.77078599995
+      },
+      "opencl_legacy": {
+        "end_to_end_seconds": 5.20198179999716,
+        "training_peak_working_set_mib": 479.078125,
+        "train_seconds": 4.27346419999958,
+        "iteration_ms": 42.7346419999958
+      },
+      "rdna2": {
+        "end_to_end_seconds": 2.5380218999926,
+        "training_peak_working_set_mib": 631.875,
+        "train_seconds": 2.5380218999926,
+        "iteration_ms": 25.380218999926,
+        "prediction_max_abs_diff_vs_cpu": 2.22e-16,
+        "tree_structure_match": true
+      }
+    }
+  },
+  "dataset_creation_cold_contiguous_slice": {
+    "shape": {
+      "train_rows": 40000,
+      "phase_rows": 45000,
+      "features": 3000,
+      "num_threads": 32
+    },
+    "h64": {
+      "cpu_v470_seconds": 3.491188999993028,
+      "cpu_v470_peak_delta_mib": 1543.53125,
+      "rdna2_seconds": 0.7741993000090588,
+      "rdna2_peak_delta_mib": 302.1171875,
+      "correctness": true
+    },
+    "h128": {
+      "cpu_v470_seconds": 2.954924200021196,
+      "cpu_v470_peak_delta_mib": 1543.48046875,
+      "rdna2_seconds": 0.7754734999907669,
+      "rdna2_peak_delta_mib": 304.21875,
+      "correctness": true
+    },
+    "warm_rdna2_seconds_range": [0.29, 0.35],
+    "pipeline_fancy_copy_mib": 457.8
+  },
+  "quantile_correctness": [
+    {"profile": "h64_quantile_a01", "max_bin": 63, "alpha": 0.1, "quantile_loss": 0.368300872405192, "prediction_max_abs_diff": 0.0, "tree_structure_match": true, "rdna2_end_to_end_seconds": 1.28453500001342},
+    {"profile": "h64_quantile_a05", "max_bin": 63, "alpha": 0.5, "quantile_loss": 0.700887144484227, "prediction_max_abs_diff": 0.0, "tree_structure_match": true, "rdna2_end_to_end_seconds": 1.2545184000046},
+    {"profile": "h64_quantile_a09", "max_bin": 63, "alpha": 0.9, "quantile_loss": 0.365901024203, "prediction_max_abs_diff": 0.0, "tree_structure_match": true, "rdna2_end_to_end_seconds": 1.28594600001816},
+    {"profile": "h128_quantile_a01", "max_bin": 127, "alpha": 0.1, "quantile_loss": 0.433024126251489, "prediction_max_abs_diff": 0.0, "tree_structure_match": true, "rdna2_end_to_end_seconds": 1.33371669999906},
+    {"profile": "h128_quantile_a05", "max_bin": 127, "alpha": 0.5, "quantile_loss": 0.834195356944114, "prediction_max_abs_diff": 0.0, "tree_structure_match": true, "rdna2_end_to_end_seconds": 1.24785939999856},
+    {"profile": "h128_quantile_a09", "max_bin": 127, "alpha": 0.9, "quantile_loss": 0.435147400825483, "prediction_max_abs_diff": 8.88178419700125e-16, "tree_structure_match": true, "rdna2_end_to_end_seconds": 1.24414520000573}
+  ]
+}

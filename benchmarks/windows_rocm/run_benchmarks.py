@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes as C
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import threading
 import time
 
 import numpy as np
@@ -76,6 +78,21 @@ PROFILE_CONFIGS = {
         **H64_BASE, "description": "H64 L2 regression correctness probe", "objective": "regression_l2",
         "metric": "l2", "scale_pos_weight": 1.0, "feature_fraction": 1.0, "bagging_fraction": 1.0,
     },
+    "h64_quantile_a01": {
+        **H64_BASE, "description": "H64 quantile regression alpha=0.1 correctness probe",
+        "objective": "quantile", "metric": "quantile", "alpha": 0.1, "scale_pos_weight": 1.0,
+        "feature_fraction": 1.0, "bagging_fraction": 1.0,
+    },
+    "h64_quantile_a05": {
+        **H64_BASE, "description": "H64 quantile regression alpha=0.5 correctness probe",
+        "objective": "quantile", "metric": "quantile", "alpha": 0.5, "scale_pos_weight": 1.0,
+        "feature_fraction": 1.0, "bagging_fraction": 1.0,
+    },
+    "h64_quantile_a09": {
+        **H64_BASE, "description": "H64 quantile regression alpha=0.9 correctness probe",
+        "objective": "quantile", "metric": "quantile", "alpha": 0.9, "scale_pos_weight": 1.0,
+        "feature_fraction": 1.0, "bagging_fraction": 1.0,
+    },
     "h128_subsample1": {**H128_BASE, "description": "H128 without bagging", "bagging_fraction": 1.0},
     "h128_feature50": {**H128_BASE, "description": "H128 with 50% feature sampling", "feature_fraction": 0.5},
     "h128_feature75": {**H128_BASE, "description": "H128 with 75% feature sampling", "feature_fraction": 0.75},
@@ -89,6 +106,21 @@ PROFILE_CONFIGS = {
     "h128_regression": {
         **H128_BASE, "description": "H128 L2 regression correctness probe", "objective": "regression_l2",
         "metric": "l2", "scale_pos_weight": 1.0, "feature_fraction": 1.0, "bagging_fraction": 1.0,
+    },
+    "h128_quantile_a01": {
+        **H128_BASE, "description": "H128 quantile regression alpha=0.1 correctness probe",
+        "objective": "quantile", "metric": "quantile", "alpha": 0.1, "scale_pos_weight": 1.0,
+        "feature_fraction": 1.0, "bagging_fraction": 1.0,
+    },
+    "h128_quantile_a05": {
+        **H128_BASE, "description": "H128 quantile regression alpha=0.5 correctness probe",
+        "objective": "quantile", "metric": "quantile", "alpha": 0.5, "scale_pos_weight": 1.0,
+        "feature_fraction": 1.0, "bagging_fraction": 1.0,
+    },
+    "h128_quantile_a09": {
+        **H128_BASE, "description": "H128 quantile regression alpha=0.9 correctness probe",
+        "objective": "quantile", "metric": "quantile", "alpha": 0.9, "scale_pos_weight": 1.0,
+        "feature_fraction": 1.0, "bagging_fraction": 1.0,
     },
     # Representative points from the production Optuna envelope. These are not a Cartesian product:
     # together they exercise every tree-depth tier, both Stage-2 bin counts, regularization extremes,
@@ -180,7 +212,14 @@ OPTUNA_COMPAT_PROFILES = [
     "optuna_d4_verytight_strong",
     "optuna_d8_deep_light",
 ]
-STRESS_PROFILES = [name for name in PROFILE_CONFIGS if not name.startswith("optuna_")]
+QUANTILE_PROFILES = [
+    "h64_quantile_a01", "h64_quantile_a05", "h64_quantile_a09",
+    "h128_quantile_a01", "h128_quantile_a05", "h128_quantile_a09",
+]
+STRESS_PROFILES = [
+    name for name in PROFILE_CONFIGS
+    if not name.startswith("optuna_") and name not in QUANTILE_PROFILES
+]
 
 
 def profile_param_string(profile: dict) -> str:
@@ -209,6 +248,8 @@ def profile_param_string(profile: dict) -> str:
     ]
     if profile["objective"] == "binary":
         parts.append(f"scale_pos_weight={profile['scale_pos_weight']}")
+    if profile["objective"] == "quantile":
+        parts.append(f"alpha={profile['alpha']}")
     return " ".join(parts)
 
 
@@ -216,6 +257,13 @@ def rmse_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     y = np.asarray(y_true, dtype=np.float64)
     pred = np.asarray(y_pred, dtype=np.float64)
     return float(np.sqrt(np.mean((pred - y) ** 2)))
+
+
+def quantile_loss_score(y_true: np.ndarray, y_pred: np.ndarray, alpha: float) -> float:
+    y = np.asarray(y_true, dtype=np.float64)
+    pred = np.asarray(y_pred, dtype=np.float64)
+    residual = y - pred
+    return float(np.mean(np.maximum(alpha * residual, (alpha - 1.0) * residual)))
 
 
 def auc_score(y_true: np.ndarray, y_score: np.ndarray) -> float:
@@ -305,6 +353,17 @@ def generate_regression_dataset(train_rows: int, valid_rows: int, features: int)
     return train_file, train_binary, valid_features_file, valid_npz
 
 
+class PROCESS_MEMORY_COUNTERS_EX(C.Structure):
+    _fields_ = [
+        ("cb", C.c_ulong), ("PageFaultCount", C.c_ulong),
+        ("PeakWorkingSetSize", C.c_size_t), ("WorkingSetSize", C.c_size_t),
+        ("QuotaPeakPagedPoolUsage", C.c_size_t), ("QuotaPagedPoolUsage", C.c_size_t),
+        ("QuotaPeakNonPagedPoolUsage", C.c_size_t), ("QuotaNonPagedPoolUsage", C.c_size_t),
+        ("PagefileUsage", C.c_size_t), ("PeakPagefileUsage", C.c_size_t),
+        ("PrivateUsage", C.c_size_t),
+    ]
+
+
 def run_checked(cmd: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     print("+", subprocess.list2cmdline(cmd), flush=True)
     p = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
@@ -312,6 +371,63 @@ def run_checked(cmd: list[str], env: dict[str, str] | None = None) -> subprocess
     if p.returncode != 0:
         raise RuntimeError(f"command failed with exit code {p.returncode}: {subprocess.list2cmdline(cmd)}")
     return p
+
+
+def run_checked_with_peak_memory(
+    cmd: list[str], env: dict[str, str] | None = None, poll_seconds: float = 0.01
+) -> tuple[subprocess.CompletedProcess[str], float]:
+    print("+", subprocess.list2cmdline(cmd), flush=True)
+    proc = subprocess.Popen(
+        cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, bufsize=1
+    )
+    kernel32 = C.WinDLL("kernel32", use_last_error=True)
+    psapi = C.WinDLL("psapi", use_last_error=True)
+    PROCESS_QUERY_INFORMATION = 0x0400
+    PROCESS_VM_READ = 0x0010
+    kernel32.OpenProcess.argtypes = [C.c_ulong, C.c_int, C.c_ulong]
+    kernel32.OpenProcess.restype = C.c_void_p
+    kernel32.CloseHandle.argtypes = [C.c_void_p]
+    psapi.GetProcessMemoryInfo.argtypes = [C.c_void_p, C.POINTER(PROCESS_MEMORY_COUNTERS_EX), C.c_ulong]
+    psapi.GetProcessMemoryInfo.restype = C.c_int
+    handle = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, proc.pid)
+    if not handle:
+        proc.kill()
+        proc.wait()
+        raise OSError(C.get_last_error(), f"OpenProcess failed for pid {proc.pid}")
+
+    lines: list[str] = []
+
+    def read_output() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            lines.append(line)
+            print(line, end="")
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+    peak_bytes = 0
+    try:
+        while proc.poll() is None:
+            counters = PROCESS_MEMORY_COUNTERS_EX()
+            counters.cb = C.sizeof(counters)
+            if psapi.GetProcessMemoryInfo(handle, C.byref(counters), counters.cb):
+                peak_bytes = max(peak_bytes, int(counters.PeakWorkingSetSize))
+            time.sleep(poll_seconds)
+        reader.join()
+        counters = PROCESS_MEMORY_COUNTERS_EX()
+        counters.cb = C.sizeof(counters)
+        if psapi.GetProcessMemoryInfo(handle, C.byref(counters), counters.cb):
+            peak_bytes = max(peak_bytes, int(counters.PeakWorkingSetSize))
+    finally:
+        kernel32.CloseHandle(handle)
+
+    stdout = "".join(lines)
+    completed = subprocess.CompletedProcess(cmd, proc.returncode, stdout=stdout, stderr=None)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"command failed with exit code {completed.returncode}: {subprocess.list2cmdline(cmd)}"
+        )
+    return completed, peak_bytes / (1024.0 * 1024.0)
 
 
 def ensure_binary_dataset(old_dll: Path, train_text: Path, train_binary: Path, max_bin: int) -> None:
@@ -367,7 +483,7 @@ def run_rocm_cli(name: str, exe: Path, device_type: str, train_file: Path, valid
         f"num_iterations={iterations}", f"output_model={model}",
     ]
     wall0 = time.perf_counter()
-    proc = run_checked([str(exe), *common], env=env)
+    proc, training_peak_working_set_mib = run_checked_with_peak_memory([str(exe), *common], env=env)
     wall_seconds = time.perf_counter() - wall0
     match = re.findall(r"([0-9.]+) seconds elapsed, finished iteration (\d+)", proc.stdout)
     train_seconds = wall_seconds
@@ -388,10 +504,17 @@ def run_rocm_cli(name: str, exe: Path, device_type: str, train_file: Path, valid
     payload = {
         "name": name, "backend": "cli", "device": device_type, "dataset_seconds": None,
         "init_seconds": None, "train_seconds": train_seconds, "train_wall_seconds": wall_seconds,
+        "end_to_end_seconds": wall_seconds,
+        "training_peak_working_set_mib": training_peak_working_set_mib,
+        "training_peak_delta_mib": training_peak_working_set_mib,
         "predict_seconds": predict_seconds, "iteration_ms": train_seconds * 1000.0 / iterations,
-        "objective": profile["objective"],
+        "objective": profile["objective"], "alpha": profile.get("alpha"),
         "auc": auc_score(y_valid, preds) if profile["objective"] == "binary" else None,
         "rmse": rmse_score(y_valid, preds) if profile["objective"] != "binary" else None,
+        "quantile_loss": (
+            quantile_loss_score(y_valid, preds, float(profile["alpha"]))
+            if profile["objective"] == "quantile" else None
+        ),
         "prediction_min": float(preds.min()),
         "prediction_max": float(preds.max()), "prediction_std": float(preds.std()),
         "model": str(model), "predictions": str(pred),
@@ -433,7 +556,7 @@ def confusion_matrix(y_true: np.ndarray, hard_pred: np.ndarray) -> dict[str, int
 def compare(
     results: list[dict], iterations: int, y_valid: np.ndarray, objective: str, atol: float, rtol: float,
     auc_tol: float, regression_metric_tol: float, correlation_min: float, threshold: float,
-    min_class_fraction: float, min_confident_fraction: float,
+    min_class_fraction: float, min_confident_fraction: float, quantile_alpha: float | None = None,
 ) -> dict:
     reference = next(item for item in results if item["name"] == "v470_cpu")
     gated_names = {"v470_rdna2"}
@@ -445,6 +568,10 @@ def compare(
     binary = objective == "binary"
     ref_auc = auc_score(y_valid, ref_pred) if binary else None
     ref_rmse = rmse_score(y_valid, ref_pred) if not binary else None
+    ref_quantile_loss = (
+        quantile_loss_score(y_valid, ref_pred, float(quantile_alpha))
+        if objective == "quantile" and quantile_alpha is not None else None
+    )
     ref_hard = (ref_pred >= threshold).astype(np.int8) if binary else None
     ref_confusion = confusion_matrix(y_valid, ref_hard) if binary else None
     if binary:
@@ -529,10 +656,23 @@ def compare(
             rmse = rmse_score(y_valid, pred)
             rmse_diff = abs(rmse - ref_rmse)
             record.update({"rmse": rmse, "rmse_abs_diff": rmse_diff})
+            quantile_loss = None
+            quantile_loss_diff = None
+            if objective == "quantile":
+                if quantile_alpha is None:
+                    raise RuntimeError("quantile correctness requires alpha")
+                quantile_loss = quantile_loss_score(y_valid, pred, float(quantile_alpha))
+                quantile_loss_diff = abs(quantile_loss - float(ref_quantile_loss))
+                record.update({
+                    "alpha": float(quantile_alpha),
+                    "quantile_loss": quantile_loss,
+                    "quantile_loss_abs_diff": quantile_loss_diff,
+                })
             failed = (
                 not finite or not nonconstant or trees != iterations or not allclose
                 or structural != ref_struct or correlation < correlation_min
                 or rmse_diff > regression_metric_tol
+                or (quantile_loss_diff is not None and quantile_loss_diff > regression_metric_tol)
             )
 
         comparisons.append(record)
@@ -550,6 +690,7 @@ def compare(
         "reference_confident_fraction": ref_confident_fraction,
         "required_confident_fraction": required_confident_fraction,
         "reference_confusion_matrix": ref_confusion, "reference_auc": ref_auc, "reference_rmse": ref_rmse,
+        "quantile_alpha": quantile_alpha, "reference_quantile_loss": ref_quantile_loss,
         "all_checks_passed": not failures, "comparisons": comparisons, "failures": failures,
     }
 
@@ -621,7 +762,7 @@ def main() -> int:
     comparison = compare(
         results, args.iterations, y_valid, profile["objective"], args.atol, args.rtol, args.auc_tol,
         args.regression_metric_tol, args.correlation_min, args.classification_threshold,
-        args.min_class_fraction, args.min_confident_fraction,
+        args.min_class_fraction, args.min_confident_fraction, profile.get("alpha"),
     )
     report = {
         "profile": args.profile,
@@ -637,7 +778,11 @@ def main() -> int:
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     print(f"\n=== BENCHMARK SUMMARY [{args.profile}: max_bin={profile['max_bin']}, objective={profile['objective']}] ===")
-    metric_name = "auc" if profile["objective"] == "binary" else "rmse"
+    metric_name = (
+        "auc" if profile["objective"] == "binary"
+        else "quantile_loss" if profile["objective"] == "quantile"
+        else "rmse"
+    )
     print(f"{'mode':<20} {'train_s':>10} {'iter_ms':>10} {metric_name:>10} {'pred_diff':>12} {'trees':>7} {'struct':>8}")
     cmp_by_name = {x["name"]: x for x in comparison["comparisons"]}
     for r in results:

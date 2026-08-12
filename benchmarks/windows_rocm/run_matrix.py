@@ -13,6 +13,7 @@ from run_benchmarks import (
     OPTUNA_LONG_ITERATIONS,
     OPTUNA_PROFILES,
     PROFILE_CONFIGS,
+    QUANTILE_PROFILES,
     SMOKE_PROFILES,
     STRESS_PROFILES,
 )
@@ -49,7 +50,7 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument(
         "--suite",
-        choices=["smoke", "production", "stress", "feature_fraction", "optuna", "optuna_long", "optuna_compat"],
+        choices=["smoke", "production", "stress", "quantile", "feature_fraction", "optuna", "optuna_long", "optuna_compat"],
         default="smoke",
     )
     p.add_argument("--train-rows", type=int, default=40000)
@@ -66,6 +67,10 @@ def main() -> int:
         profiles = STRESS_PROFILES
         default_iterations = 20
         modes = "all"
+    elif args.suite == "quantile":
+        profiles = QUANTILE_PROFILES
+        default_iterations = 20
+        modes = "v470"
     elif args.suite == "feature_fraction":
         profiles = FEATURE_FRACTION_PROFILES
         default_iterations = 20
@@ -91,7 +96,7 @@ def main() -> int:
     valid_rows = (
         args.valid_rows
         if args.valid_rows is not None
-        else (5000 if args.suite in {"smoke", "feature_fraction", "optuna", "optuna_compat"} else 50000)
+        else (5000 if args.suite in {"smoke", "quantile", "feature_fraction", "optuna", "optuna_compat"} else 50000)
     )
     unknown = [profile for profile in profiles if profile not in PROFILE_CONFIGS]
     if unknown:
@@ -134,6 +139,9 @@ def main() -> int:
                     if item["summary"] is not None else False
                 ),
                 "config": item["summary"]["config"] if item["summary"] is not None else None,
+                "cpu": next(
+                    (r for r in item["summary"]["results"] if r["name"] == "v470_cpu"), None
+                ) if item["summary"] is not None else None,
                 "rdna2": next(
                     (r for r in item["summary"]["results"] if r["name"] == "v470_rdna2"), None
                 ) if item["summary"] is not None else None,
@@ -158,7 +166,11 @@ def main() -> int:
     for item in matrix["results"]:
         rdna2 = item["rdna2"] or {}
         cmp = item["rdna2_comparison"] or {}
-        metric = rdna2.get("auc") if rdna2.get("auc") is not None else rdna2.get("rmse")
+        metric = (
+            rdna2.get("auc") if rdna2.get("auc") is not None
+            else rdna2.get("quantile_loss") if rdna2.get("quantile_loss") is not None
+            else rdna2.get("rmse")
+        )
         opencl_cmp = item.get("opencl_comparison") or {}
         opencl_suffix = (
             f" opencl_diff={opencl_cmp.get('prediction_max_abs_diff', float('nan')):.3g}"

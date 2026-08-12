@@ -127,7 +127,7 @@ def cpu_dataset_equivalence(cpu_dll: Path, canonical_binary: Path, candidate_bin
     result = compare(
         [canonical, candidate], iterations, y_valid, profile["objective"], args.atol, args.rtol, args.auc_tol,
         args.regression_metric_tol, args.correlation_min, args.classification_threshold,
-        args.min_class_fraction, args.min_confident_fraction,
+        args.min_class_fraction, args.min_confident_fraction, profile.get("alpha"),
     )
     canonical["name"], candidate["name"] = original_names
     return result
@@ -143,7 +143,7 @@ def compare_canonical_split_representations(cpu_dll: Path, binaries: dict[str, P
     result = compare(
         [fancy, sliced], iterations, y_valid, profile["objective"], args.atol, args.rtol, args.auc_tol,
         args.regression_metric_tol, args.correlation_min, args.classification_threshold,
-        args.min_class_fraction, args.min_confident_fraction,
+        args.min_class_fraction, args.min_confident_fraction, profile.get("alpha"),
     )
     fancy["name"], sliced["name"] = original_names
     return result
@@ -251,7 +251,7 @@ def main() -> int:
             end_to_end_comparison = compare(
                 [cpu_result, rdna2_result], args.iterations, y_valid, profile["objective"], args.atol, args.rtol,
                 args.auc_tol, args.regression_metric_tol, args.correlation_min, args.classification_threshold,
-                args.min_class_fraction, args.min_confident_fraction,
+                args.min_class_fraction, args.min_confident_fraction, profile.get("alpha"),
             )
             cpu_result["name"], rdna2_result["name"] = original_names
             mode_report["end_to_end_results"] = [cpu_result, rdna2_result]
