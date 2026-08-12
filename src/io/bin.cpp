@@ -317,6 +317,23 @@ void BinMapper::FindBin(double* values, int num_sample_values, size_t total_samp
                         int max_bin, int min_data_in_bin, int min_split_data, bool pre_filter, BinType bin_type,
                         bool use_missing, bool zero_as_missing,
                         const std::vector<double>& forced_upper_bounds) {
+  FindBinInternal(values, num_sample_values, total_sample_cnt, max_bin, min_data_in_bin, min_split_data,
+                  pre_filter, bin_type, use_missing, zero_as_missing, forced_upper_bounds, false);
+}
+
+void BinMapper::FindBinFromSortedValues(double* values, int num_sample_values, size_t total_sample_cnt,
+                                        int max_bin, int min_data_in_bin, int min_split_data, bool pre_filter, BinType bin_type,
+                                        bool use_missing, bool zero_as_missing,
+                                        const std::vector<double>& forced_upper_bounds) {
+  FindBinInternal(values, num_sample_values, total_sample_cnt, max_bin, min_data_in_bin, min_split_data,
+                  pre_filter, bin_type, use_missing, zero_as_missing, forced_upper_bounds, true);
+}
+
+void BinMapper::FindBinInternal(double* values, int num_sample_values, size_t total_sample_cnt,
+                                int max_bin, int min_data_in_bin, int min_split_data, bool pre_filter, BinType bin_type,
+                                bool use_missing, bool zero_as_missing,
+                                const std::vector<double>& forced_upper_bounds,
+                                bool values_are_sorted) {
   int na_cnt = 0;
   int non_na_cnt = 0;
   for (int i = 0; i < num_sample_values; ++i) {
@@ -345,7 +362,9 @@ void BinMapper::FindBin(double* values, int num_sample_values, size_t total_samp
   std::vector<double> distinct_values;
   std::vector<int> counts;  // count of data points for each distinct feature value.
 
-  std::stable_sort(values, values + num_sample_values);
+  if (!values_are_sorted) {
+    std::stable_sort(values, values + num_sample_values);
+  }
 
   // push zero in the front
   if (num_sample_values == 0 || (values[0] > 0.0f && zero_cnt > 0)) {

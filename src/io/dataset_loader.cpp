@@ -12,8 +12,12 @@
 #include <LightGBM/utils/openmp_wrapper.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstdint>
+#include <cstring>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -24,6 +28,46 @@
 namespace LightGBM {
 
 using json11_internal_lightgbm::Json;
+
+namespace {
+
+inline uint32_t FloatSortKey(float value) {
+  uint32_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  return (bits & 0x80000000u) != 0 ? ~bits : (bits ^ 0x80000000u);
+}
+
+void StableRadixSortFloat(std::vector<float>* values) {
+  if (values == nullptr || values->size() < 2) {
+    return;
+  }
+  std::vector<float> scratch(values->size());
+  float* source = values->data();
+  float* destination = scratch.data();
+  for (int pass = 0; pass < 4; ++pass) {
+    std::array<size_t, 256> counts{};
+    const int shift = pass * 8;
+    for (size_t i = 0; i < values->size(); ++i) {
+      ++counts[(FloatSortKey(source[i]) >> shift) & 0xffu];
+    }
+    std::array<size_t, 256> offsets{};
+    size_t offset = 0;
+    for (size_t bucket = 0; bucket < counts.size(); ++bucket) {
+      offsets[bucket] = offset;
+      offset += counts[bucket];
+    }
+    for (size_t i = 0; i < values->size(); ++i) {
+      const uint32_t bucket = (FloatSortKey(source[i]) >> shift) & 0xffu;
+      destination[offsets[bucket]++] = source[i];
+    }
+    std::swap(source, destination);
+  }
+  if (source != values->data()) {
+    std::memcpy(values->data(), source, values->size() * sizeof(float));
+  }
+}
+
+}  // namespace
 
 DatasetLoader::DatasetLoader(const Config& io_config, const PredictFunction& predict_fun, int num_class, const char* filename)
   :config_(io_config), random_(config_.data_random_seed), predict_fun_(predict_fun), num_class_(num_class) {
@@ -805,26 +849,53 @@ Dataset* DatasetLoader::ConstructFromDenseFloat32(
       }
     }
 
-    std::vector<double> values;
-    values.reserve(sample_cnt);
-    for (int sample_pos = 0; sample_pos < sample_cnt; ++sample_pos) {
-      const float value = data[static_cast<size_t>(sample_indices[sample_pos]) * num_col + feature];
-      if (std::fabs(value) > kZeroThreshold || std::isnan(value)) {
-        values.emplace_back(static_cast<double>(value));
-      }
-    }
-    raw_num_per_col[feature] = static_cast<int>(values.size());
-
     bin_mappers[feature].reset(new BinMapper());
     const int max_bin = config_.max_bin_by_feature.empty()
                             ? config_.max_bin
                             : config_.max_bin_by_feature[feature];
-    bin_mappers[feature]->FindBin(
-        values.data(), static_cast<int>(values.size()), sample_indices.size(),
-        max_bin, config_.min_data_in_bin, filter_cnt, config_.feature_pre_filter,
-        bin_type, config_.use_missing, config_.zero_as_missing,
-        forced_bin_bounds[feature]);
-
+    if (bin_type == BinType::NumericalBin) {
+      std::vector<float> finite_values;
+      finite_values.reserve(sample_cnt);
+      int nan_count = 0;
+      for (int sample_pos = 0; sample_pos < sample_cnt; ++sample_pos) {
+        const float value = data[static_cast<size_t>(sample_indices[sample_pos]) * num_col + feature];
+        if (std::isnan(value)) {
+          ++nan_count;
+        } else if (std::fabs(value) > kZeroThreshold) {
+          finite_values.emplace_back(value);
+        }
+      }
+      raw_num_per_col[feature] = static_cast<int>(finite_values.size()) + nan_count;
+      StableRadixSortFloat(&finite_values);
+      std::vector<double> sorted_values;
+      sorted_values.reserve(raw_num_per_col[feature]);
+      for (float value : finite_values) {
+        sorted_values.emplace_back(static_cast<double>(value));
+      }
+      for (int i = 0; i < nan_count; ++i) {
+        sorted_values.emplace_back(std::numeric_limits<double>::quiet_NaN());
+      }
+      bin_mappers[feature]->FindBinFromSortedValues(
+          sorted_values.data(), static_cast<int>(sorted_values.size()), sample_indices.size(),
+          max_bin, config_.min_data_in_bin, filter_cnt, config_.feature_pre_filter,
+          bin_type, config_.use_missing, config_.zero_as_missing,
+          forced_bin_bounds[feature]);
+    } else {
+      std::vector<double> values;
+      values.reserve(sample_cnt);
+      for (int sample_pos = 0; sample_pos < sample_cnt; ++sample_pos) {
+        const float value = data[static_cast<size_t>(sample_indices[sample_pos]) * num_col + feature];
+        if (std::fabs(value) > kZeroThreshold || std::isnan(value)) {
+          values.emplace_back(static_cast<double>(value));
+        }
+      }
+      raw_num_per_col[feature] = static_cast<int>(values.size());
+      bin_mappers[feature]->FindBin(
+          values.data(), static_cast<int>(values.size()), sample_indices.size(),
+          max_bin, config_.min_data_in_bin, filter_cnt, config_.feature_pre_filter,
+          bin_type, config_.use_missing, config_.zero_as_missing,
+          forced_bin_bounds[feature]);
+    }
     const int most_freq_bin = bin_mappers[feature]->GetMostFreqBin();
     const bool default_is_most_freq =
         bin_mappers[feature]->GetDefaultBin() == most_freq_bin;
