@@ -251,6 +251,15 @@ class FeatureGroup {
    * \param line_idx Index of record
    * \param value feature value of record
    */
+  inline bool LoadSingleFeatureCanonicalBinRange(const uint8_t* canonical_bins, data_size_t row_start,
+                                                 data_size_t row_count) {
+    if (is_multi_val_ || is_sparse_ || num_feature_ != 1 || bin_data_ == nullptr) {
+      return false;
+    }
+    return bin_data_->LoadSingleFeatureCanonicalBinRange(
+        canonical_bins, row_start, row_count, bin_mappers_[0]->GetMostFreqBin(), bin_offsets_[0]);
+  }
+
   inline void PushData(int tid, int sub_feature_idx, data_size_t line_idx, double value) {
     uint32_t bin = bin_mappers_[sub_feature_idx]->ValueToBin(value);
     if (bin == bin_mappers_[sub_feature_idx]->GetMostFreqBin()) {

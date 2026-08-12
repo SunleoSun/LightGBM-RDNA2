@@ -74,13 +74,14 @@ def ensure_valid_text(valid_npz: Path) -> Path:
     return valid_text
 
 
-def run_dataset_worker(name: str, dll: Path, input_npz: Path, binary_out: Path, max_bin: int, num_threads: int, sample_cnt: int, train_start: int, train_end: int, extraction: str) -> dict:
+def run_dataset_worker(name: str, dll: Path, input_npz: Path, binary_out: Path, max_bin: int, num_threads: int, sample_cnt: int, train_start: int, train_end: int, extraction: str, device_type: str = "cpu", gpu_device_id: int = 0) -> dict:
     result_out = ARTIFACTS / f"{name}.dataset.json"
     cmd = [
         sys.executable, str(HERE / "run_dataset_worker.py"),
         "--dll", str(dll), "--input-npz", str(input_npz), "--binary-out", str(binary_out),
         "--result-out", str(result_out), "--max-bin", str(max_bin), "--num-threads", str(num_threads),
-        "--bin-construct-sample-cnt", str(sample_cnt), "--train-start", str(train_start), "--train-end", str(train_end),
+        "--bin-construct-sample-cnt", str(sample_cnt), "--device-type", device_type,
+        "--gpu-device-id", str(gpu_device_id), "--train-start", str(train_start), "--train-end", str(train_end),
         "--split-extraction", extraction,
     ]
     run_checked(cmd)
@@ -164,6 +165,8 @@ def main() -> int:
     p.add_argument("--num-threads", type=int, default=32)
     p.add_argument("--bin-construct-sample-cnt", type=int, default=200000)
     p.add_argument("--candidate-dll", type=Path, default=DEFAULT_ROCM_DLL)
+    p.add_argument("--candidate-dataset-device", choices=["cpu", "rdna2"], default="cpu")
+    p.add_argument("--gpu-device-id", type=int, default=0)
     p.add_argument("--atol", type=float, default=1e-6)
     p.add_argument("--rtol", type=float, default=1e-6)
     p.add_argument("--auc-tol", type=float, default=5e-8)
@@ -209,11 +212,12 @@ def main() -> int:
         canonical_binaries[extraction] = canonical_binary
         canonical_dataset = run_dataset_worker(
             f"canonical_v470_{extraction}", cpu_dll, phase_npz, canonical_binary, int(profile["max_bin"]),
-            args.num_threads, args.bin_construct_sample_cnt, train_start, train_end, extraction,
+            args.num_threads, args.bin_construct_sample_cnt, train_start, train_end, extraction, "cpu", args.gpu_device_id,
         )
         candidate_dataset = run_dataset_worker(
             f"candidate_{extraction}", args.candidate_dll, phase_npz, candidate_binary, int(profile["max_bin"]),
             args.num_threads, args.bin_construct_sample_cnt, train_start, train_end, extraction,
+            args.candidate_dataset_device, args.gpu_device_id,
         )
         equivalence = cpu_dataset_equivalence(
             cpu_dll, canonical_binary, candidate_binary, valid_npz, args.iterations, profile, args, extraction

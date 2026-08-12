@@ -469,6 +469,7 @@ set(
       src/treelearner/cuda/cuda_leaf_splits.cu
       src/treelearner/cuda/cuda_single_gpu_tree_learner.cu
       src/treelearner/rdna2/rdna2_histogram_engine.cu
+      src/io/rdna2_dataset_population.cu
       src/treelearner/rdna2/rdna2_best_split_engine.cpp
       src/treelearner/rdna2/rdna2_best_split_engine.cu
       src/io/cuda/cuda_column_data.cu

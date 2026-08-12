@@ -37,6 +37,7 @@
 #ifndef LGB_R_BUILD
 #include "arrow/array.hpp"
 #endif  // LGB_R_BUILD
+#include "io/rdna2_dataset_population.hpp"
 #include <LightGBM/utils/yamc/alternate_shared_mutex.hpp>
 #include <LightGBM/utils/yamc/yamc_shared_lock.hpp>
 
@@ -1403,35 +1404,43 @@ int LGBM_DatasetCreateFromMats(int32_t nmat,
   }
   const bool dense_row_major_float32 =
       nmat == 1 && data_type == C_API_DTYPE_FLOAT32 && is_row_major[0] != 0;
-  if (dense_row_major_float32) {
-    const float* data_ptr = reinterpret_cast<const float*>(data[0]);
-    OMP_INIT_EX();
-    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-    for (int i = 0; i < nrow[0]; ++i) {
-      OMP_LOOP_EX_BEGIN();
-      const int tid = omp_get_thread_num();
-      const float* row_ptr = data_ptr + static_cast<size_t>(i) * ncol;
-      for (int k = 0; k < ncol; ++k) {
-        ret->PushOneValue(tid, i, static_cast<size_t>(k), static_cast<double>(row_ptr[k]));
-      }
-      OMP_LOOP_EX_END();
-    }
-    OMP_THROW_EX();
-  } else {
-    int32_t start_row = 0;
-    for (int j = 0; j < nmat; ++j) {
+  bool populated_on_rdna2 = false;
+#ifdef USE_CUDA
+  if (dense_row_major_float32 && config.device_type == std::string("rdna2")) {
+    populated_on_rdna2 = LightGBM::RDNA2PopulateDenseFloat32Dataset(
+        ret.get(), reinterpret_cast<const float*>(data[0]), nrow[0], ncol, config.gpu_device_id);
+  }
+#endif
+  if (!populated_on_rdna2) {
+    if (dense_row_major_float32) {
+      const float* data_ptr = reinterpret_cast<const float*>(data[0]);
       OMP_INIT_EX();
       #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-      for (int i = 0; i < nrow[j]; ++i) {
+      for (int i = 0; i < nrow[0]; ++i) {
         OMP_LOOP_EX_BEGIN();
         const int tid = omp_get_thread_num();
-        auto one_row = get_row_fun[j](i);
-        ret->PushOneRow(tid, start_row + i, one_row);
+        const float* row_ptr = data_ptr + static_cast<size_t>(i) * ncol;
+        for (int k = 0; k < ncol; ++k) {
+          ret->PushOneValue(tid, i, static_cast<size_t>(k), static_cast<double>(row_ptr[k]));
+        }
         OMP_LOOP_EX_END();
       }
       OMP_THROW_EX();
-
-      start_row += nrow[j];
+    } else {
+      int32_t start_row = 0;
+      for (int j = 0; j < nmat; ++j) {
+        OMP_INIT_EX();
+        #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+        for (int i = 0; i < nrow[j]; ++i) {
+          OMP_LOOP_EX_BEGIN();
+          const int tid = omp_get_thread_num();
+          auto one_row = get_row_fun[j](i);
+          ret->PushOneRow(tid, start_row + i, one_row);
+          OMP_LOOP_EX_END();
+        }
+        OMP_THROW_EX();
+        start_row += nrow[j];
+      }
     }
   }
   ret->FinishLoad();

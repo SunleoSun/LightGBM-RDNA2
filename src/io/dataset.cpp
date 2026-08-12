@@ -517,6 +517,53 @@ void Dataset::Construct(std::vector<std::unique_ptr<BinMapper>>* bin_mappers,
   gpu_device_id_ = io_config.gpu_device_id;
 }
 
+bool Dataset::CanLoadDenseFeatureMajorCanonicalBins(int num_total_features) const {
+  if (num_total_features != num_total_features_ || has_raw_ || is_finish_load_) {
+    return false;
+  }
+  for (int col = 0; col < num_total_features_; ++col) {
+    const int feature = used_feature_map_[col];
+    if (feature < 0) {
+      continue;
+    }
+    const int group = feature2group_[feature];
+    const int sub_feature = feature2subfeature_[feature];
+    const auto* feature_group = feature_groups_[group].get();
+    if (sub_feature != 0 || feature_group == nullptr || feature_group->num_feature_ != 1 ||
+        feature_group->is_multi_val_ || feature_group->is_sparse_ || feature_group->bin_data_ == nullptr ||
+        feature_group->bin_mappers_[0]->num_bin() > 255) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool Dataset::LoadDenseFeatureMajorCanonicalBinRange(const uint8_t* canonical_bins,
+                                                     int num_total_features,
+                                                     data_size_t row_start,
+                                                     data_size_t row_count) {
+  if (canonical_bins == nullptr || !CanLoadDenseFeatureMajorCanonicalBins(num_total_features) ||
+      row_start < 0 || row_count < 0 || row_start + row_count > num_data_) {
+    return false;
+  }
+
+  OMP_INIT_EX();
+  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+  for (int col = 0; col < num_total_features_; ++col) {
+    OMP_LOOP_EX_BEGIN();
+    const int feature = used_feature_map_[col];
+    if (feature >= 0) {
+      const int group = feature2group_[feature];
+      const uint8_t* feature_bins = canonical_bins + static_cast<size_t>(col) * row_count;
+      CHECK(feature_groups_[group]->LoadSingleFeatureCanonicalBinRange(
+          feature_bins, row_start, row_count));
+    }
+    OMP_LOOP_EX_END();
+  }
+  OMP_THROW_EX();
+  return true;
+}
+
 void Dataset::FinishLoad() {
   if (is_finish_load_) {
     return;

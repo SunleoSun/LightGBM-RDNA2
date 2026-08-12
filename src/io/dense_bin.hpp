@@ -82,6 +82,42 @@ class DenseBin : public Bin {
     }
   }
 
+  bool LoadSingleFeatureCanonicalBinRange(const uint8_t* canonical_bins, data_size_t row_start,
+                                          data_size_t row_count, uint32_t most_freq_bin,
+                                          uint32_t bin_offset) override {
+    if (canonical_bins == nullptr || row_start < 0 || row_count < 0 || row_start + row_count > num_data_) {
+      return false;
+    }
+    auto encode = [most_freq_bin, bin_offset](uint32_t bin) {
+      if (bin == most_freq_bin) {
+        return static_cast<uint32_t>(0);
+      }
+      if (most_freq_bin == 0) {
+        --bin;
+      }
+      return bin + bin_offset;
+    };
+    if (IS_4BIT) {
+      for (data_size_t local_row = 0; local_row < row_count; ++local_row) {
+        const data_size_t row = row_start + local_row;
+        const data_size_t packed_idx = row >> 1;
+        const uint8_t value = static_cast<uint8_t>(encode(canonical_bins[local_row]));
+        if ((row & 1) == 0) {
+          data_[packed_idx] = static_cast<VAL_T>((static_cast<uint8_t>(data_[packed_idx]) & 0xf0u) | value);
+        } else {
+          data_[packed_idx] = static_cast<VAL_T>((static_cast<uint8_t>(data_[packed_idx]) & 0x0fu) |
+                                                 static_cast<uint8_t>(value << 4));
+        }
+      }
+      std::fill(buf_.begin(), buf_.end(), static_cast<uint8_t>(0));
+    } else {
+      for (data_size_t local_row = 0; local_row < row_count; ++local_row) {
+        data_[row_start + local_row] = static_cast<VAL_T>(encode(canonical_bins[local_row]));
+      }
+    }
+    return true;
+  }
+
   void ReSize(data_size_t num_data) override {
     if (num_data_ != num_data) {
       num_data_ = num_data;

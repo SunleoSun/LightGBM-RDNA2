@@ -80,6 +80,8 @@ def main() -> int:
     p.add_argument("--max-bin", type=int, required=True)
     p.add_argument("--num-threads", type=int, default=32)
     p.add_argument("--bin-construct-sample-cnt", type=int, default=200000)
+    p.add_argument("--device-type", default="cpu")
+    p.add_argument("--gpu-device-id", type=int, default=0)
     p.add_argument("--train-start", type=int, required=True)
     p.add_argument("--train-end", type=int, required=True)
     p.add_argument("--split-extraction", choices=["pipeline_fancy", "contiguous_slice"], required=True)
@@ -131,7 +133,8 @@ def main() -> int:
     dataset = H()
     params = (
         f"max_bin={args.max_bin} feature_pre_filter=false num_threads={args.num_threads} "
-        f"bin_construct_sample_cnt={args.bin_construct_sample_cnt} verbosity=-1"
+        f"bin_construct_sample_cnt={args.bin_construct_sample_cnt} device_type={args.device_type} "
+        f"gpu_device_id={args.gpu_device_id} verbosity=-1"
     ).encode()
 
     binary_out = Path(args.binary_out).resolve()
@@ -192,6 +195,8 @@ def main() -> int:
         "max_bin": args.max_bin,
         "num_threads": args.num_threads,
         "bin_construct_sample_cnt": args.bin_construct_sample_cnt,
+        "device_type": args.device_type,
+        "gpu_device_id": args.gpu_device_id,
         "split_extraction": args.split_extraction,
         "binary_bytes": binary_out.stat().st_size,
     }

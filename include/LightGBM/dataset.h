@@ -692,6 +692,11 @@ class Dataset {
 
   LIGHTGBM_EXPORT void FinishLoad();
 
+  bool CanLoadDenseFeatureMajorCanonicalBins(int num_total_features) const;
+
+  bool LoadDenseFeatureMajorCanonicalBinRange(const uint8_t* canonical_bins, int num_total_features,
+                                              data_size_t row_start, data_size_t row_count);
+
   bool SetFieldFromArrow(const char* field_name, struct ArrowArrayStream* stream);
 
   bool SetFieldFromArrow(const char* field_name, int64_t n_chunks,
