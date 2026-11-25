@@ -284,18 +284,20 @@ __global__ void RDNA2BestSplitTopKKernel(
   if (candidate_histograms == nullptr || histogram == nullptr) {
     return;
   }
+  constexpr size_t kCandidateValues = RDNA2BestSplitEngine::kCandidateHistogramValues;
+  static_assert(kCandidateValues == kBestSplitThreads, "one thread per candidate value");
   for (int rank = 0; rank < top_k; ++rank) {
     const int inner_feature = selected_features[rank];
-    if (inner_feature < 0) {
-      continue;
+    hist_t value = 0;
+    if (inner_feature >= 0) {
+      const auto meta = feature_meta[inner_feature];
+      const size_t histogram_values = static_cast<size_t>(meta.num_bin - meta.offset) * 2;
+      if (static_cast<size_t>(tid) < histogram_values) {
+        value = histogram[hist_offsets[inner_feature] + static_cast<size_t>(tid)];
+      }
     }
-    const auto meta = feature_meta[inner_feature];
-    const size_t histogram_values = static_cast<size_t>(meta.num_bin - meta.offset) * 2;
-    if (static_cast<size_t>(tid) < histogram_values) {
-      candidate_histograms[static_cast<size_t>(rank) * RDNA2BestSplitEngine::kCandidateHistogramValues +
-                           static_cast<size_t>(tid)] =
-          histogram[hist_offsets[inner_feature] + static_cast<size_t>(tid)];
-    }
+    // The host copies each fixed-size slot, including padding and empty slots.
+    candidate_histograms[static_cast<size_t>(rank) * kCandidateValues + tid] = value;
   }
 }
 

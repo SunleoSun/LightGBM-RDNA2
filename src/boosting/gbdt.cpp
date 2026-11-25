@@ -94,6 +94,7 @@ void GBDT::Init(const Config* config, const Dataset* train_data, const Objective
     buffer << forced_splits_file.rdbuf();
     std::string err;
     forced_splits_json_ = Json::parse(buffer.str(), &err);
+    CheckForcedSplitFeatures(forced_splits_json_);
   }
 
   objective_function_ = objective_function;
@@ -148,9 +149,6 @@ void GBDT::Init(const Config* config, const Dataset* train_data, const Objective
   // get parser config file content
   parser_config_str_ = train_data_->parser_config_str();
 
-  // check that forced splits does not use feature indices larger than dataset size
-  CheckForcedSplitFeatures();
-
   // if need bagging, create buffer
   data_sample_strategy_->ResetSampleConfig(config_.get(), true);
   ResetGradientBuffers();
@@ -168,16 +166,23 @@ void GBDT::Init(const Config* config, const Dataset* train_data, const Objective
   }
 }
 
-void GBDT::CheckForcedSplitFeatures() {
+void GBDT::CheckForcedSplitFeatures(const Json& forced_splits) const {
   std::queue<Json> forced_split_nodes;
-  forced_split_nodes.push(forced_splits_json_);
+  forced_split_nodes.push(forced_splits);
   while (!forced_split_nodes.empty()) {
     Json node = forced_split_nodes.front();
     forced_split_nodes.pop();
+    if (node.is_null()) {
+      continue;
+    }
     const int feature_index = node["feature"].int_value();
-    if (feature_index > max_feature_idx_) {
-      Log::Fatal("Forced splits file includes feature index %d, but maximum feature index in dataset is %d",
-        feature_index, max_feature_idx_);
+    const int num_features = train_data_->num_total_features();
+    if (feature_index < 0 || feature_index >= num_features) {
+      Log::Fatal("Forced splits file includes feature index %d outside the dataset range [0, %d)",
+                 feature_index, num_features);
+    }
+    if (train_data_->InnerFeatureIndex(feature_index) < 0) {
+      Log::Fatal("Forced splits file includes feature index %d which was not retained by the dataset", feature_index);
     }
     if (node.object_items().count("left") > 0) {
       forced_split_nodes.push(node["left"]);
@@ -818,6 +823,16 @@ void GBDT::ResetConfig(const Config* config) {
   if (objective_function_ != nullptr && objective_function_->IsRenewTreeOutput() && !config->monotone_constraints.empty()) {
     Log::Fatal("Cannot use ``monotone_constraints`` in %s objective, please disable it.", objective_function_->GetName());
   }
+  const bool update_forced_splits = config_ != nullptr && config_->forcedsplits_filename != new_config->forcedsplits_filename;
+  Json new_forced_splits;
+  if (update_forced_splits && !new_config->forcedsplits_filename.empty()) {
+    std::ifstream forced_splits_file(new_config->forcedsplits_filename.c_str());
+    std::stringstream buffer;
+    buffer << forced_splits_file.rdbuf();
+    std::string err;
+    new_forced_splits = Json::parse(buffer.str(), &err);
+    CheckForcedSplitFeatures(new_forced_splits);
+  }
   early_stopping_round_ = new_config->early_stopping_round;
   shrinkage_rate_ = new_config->learning_rate;
   if (tree_learner_ != nullptr) {
@@ -835,20 +850,9 @@ void GBDT::ResetConfig(const Config* config) {
       ResetGradientBuffers();
     }
   }
-  if (config_.get() != nullptr && config_->forcedsplits_filename != new_config->forcedsplits_filename) {
-    // load forced_splits file
-    if (!new_config->forcedsplits_filename.empty()) {
-      std::ifstream forced_splits_file(
-          new_config->forcedsplits_filename.c_str());
-      std::stringstream buffer;
-      buffer << forced_splits_file.rdbuf();
-      std::string err;
-      forced_splits_json_ = Json::parse(buffer.str(), &err);
-      tree_learner_->SetForcedSplit(&forced_splits_json_);
-    } else {
-      forced_splits_json_ = Json();
-      tree_learner_->SetForcedSplit(nullptr);
-    }
+  if (update_forced_splits) {
+    forced_splits_json_ = std::move(new_forced_splits);
+    tree_learner_->SetForcedSplit(&forced_splits_json_);
   }
   config_.reset(new_config.release());
 }

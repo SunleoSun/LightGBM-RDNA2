@@ -1347,10 +1347,23 @@ int LGBM_DatasetCreateFromMats(int32_t nmat,
 #ifdef USE_CUDA
   std::future<bool> rdna2_dataset_prepare;
 #endif
-  int32_t total_nrow = 0;
+  CHECK_GT(nmat, 0);
+  CHECK_GT(ncol, 0);
+  CHECK_NOTNULL(data);
+  CHECK_NOTNULL(nrow);
+  CHECK_NOTNULL(is_row_major);
+  CHECK_NOTNULL(out);
+  int64_t row_count = 0;
   for (int j = 0; j < nmat; ++j) {
-    total_nrow += nrow[j];
+    CHECK_GE(nrow[j], 0);
+    if (nrow[j] > 0) {
+      CHECK_NOTNULL(data[j]);
+    }
+    row_count += nrow[j];
   }
+  CHECK_GT(row_count, 0);
+  CHECK_LE(row_count, INT32_MAX);
+  const int32_t total_nrow = static_cast<int32_t>(row_count);
 
   std::vector<std::function<std::vector<double>(int row_idx)>> get_row_fun;
   for (int j = 0; j < nmat; ++j) {
@@ -1369,7 +1382,7 @@ int LGBM_DatasetCreateFromMats(int32_t nmat,
     if (dense_row_major_float32) {
 #ifdef USE_CUDA
       if (config.device_type == std::string("rdna2") &&
-          LightGBM::RDNA2DenseFloat32DatasetPopulationNeedsPrepare(nrow[0], ncol)) {
+          LightGBM::RDNA2DenseFloat32DatasetPopulationNeedsPrepare(nrow[0], ncol, config.gpu_device_id)) {
         rdna2_dataset_prepare = std::async(
             std::launch::async, LightGBM::RDNA2PrepareDenseFloat32DatasetPopulation,
             nrow[0], ncol, config.gpu_device_id);

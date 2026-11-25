@@ -543,7 +543,7 @@ bool Dataset::LoadDenseFeatureMajorCanonicalBinRange(const uint8_t* canonical_bi
                                                      data_size_t row_start,
                                                      data_size_t row_count) {
   if (canonical_bins == nullptr || !CanLoadDenseFeatureMajorCanonicalBins(num_total_features) ||
-      row_start < 0 || row_count < 0 || row_start + row_count > num_data_) {
+      row_start < 0 || row_start > num_data_ || row_count < 0 || row_count > num_data_ - row_start) {
     return false;
   }
 

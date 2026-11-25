@@ -6,7 +6,9 @@
 #define LIGHTGBM_SRC_TREELEARNER_RDNA2_RDNA2_TREE_LEARNER_HPP_
 
 #include "../serial_tree_learner.h"
+#ifdef TIMETAG
 #include "rdna2_best_split_engine.hpp"
+#endif
 #include "rdna2_histogram_engine.hpp"
 
 namespace LightGBM {
@@ -31,18 +33,35 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
 
   void Init(const Dataset* train_data, bool is_constant_hessian) override {
     SerialTreeLearner::Init(train_data, is_constant_hessian);
-    histogram_engine_.Init(train_data, config_->gpu_device_id, config_->num_leaves);
-    histogram_engine_.RegisterDataIndices(data_partition_->indices(), static_cast<size_t>(num_data_));
-    best_split_engine_.Init(train_data, config_->gpu_device_id);
+    InitEngines();
   }
 
   void ResetTrainingDataInner(const Dataset* train_data, bool is_constant_hessian,
                               bool reset_multi_val_bin) override {
-    histogram_engine_.UnregisterDataIndices();
+    histogram_engine_.ReleaseHostRegistrations();
     SerialTreeLearner::ResetTrainingDataInner(train_data, is_constant_hessian, reset_multi_val_bin);
-    histogram_engine_.Init(train_data, config_->gpu_device_id, config_->num_leaves);
-    histogram_engine_.RegisterDataIndices(data_partition_->indices(), static_cast<size_t>(num_data_));
-    best_split_engine_.Init(train_data, config_->gpu_device_id);
+    InitEngines();
+  }
+
+  void ResetConfig(const Config* config) override {
+    CHECK_EQ(DeviceId(*config), DeviceId(*config_));
+    const bool resize_pool = config->num_leaves != config_->num_leaves;
+    if (resize_pool) {
+      histogram_engine_.ReleaseHostRegistrations();
+    }
+    SerialTreeLearner::ResetConfig(config);
+    if (resize_pool) {
+      InitEngines();
+    }
+  }
+
+  Tree* Train(const score_t* gradients, const score_t* hessians, bool is_first_tree) override {
+    if (histogram_engine_.h128_eligible()) {
+      SetCUDADevice(DeviceId(*config_), __FILE__, __LINE__);
+    }
+    std::unique_ptr<Tree> tree(SerialTreeLearner::Train(gradients, hessians, is_first_tree));
+    histogram_engine_.WaitForPendingUploads();
+    return tree.release();
   }
 
  protected:
@@ -59,6 +78,7 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
   }
 
   void Split(Tree* tree, int best_leaf, int* left_leaf, int* right_leaf) override {
+    histogram_engine_.WaitForPendingUploads();
     SerialTreeLearner::Split(tree, best_leaf, left_leaf, right_leaf);
     if (!config_->use_quantized_grad &&
         (histogram_engine_.h64_eligible() || histogram_engine_.h128_eligible())) {
@@ -75,36 +95,13 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
         std::count(is_feature_used.begin(), is_feature_used.end(), static_cast<int8_t>(1)));
 #endif
     const bool only_smaller_leaf_needed = larger_leaf_histogram_array_ == nullptr || use_subtract;
-    if (!config_->use_quantized_grad && only_smaller_leaf_needed) {
+    if (!config_->use_quantized_grad && histogram_engine_.h128_eligible() && only_smaller_leaf_needed) {
       hist_t* ptr_smaller_leaf_hist_data = smaller_leaf_histogram_array_[0].RawData() - kHistOffset;
       if (histogram_engine_.ConstructHistogram(is_feature_used, smaller_leaf_splits_->data_indices(),
                                                 smaller_leaf_splits_->num_data_in_leaf(),
                                                 ptr_smaller_leaf_hist_data, smaller_leaf_splits_->leaf_index(),
                                                 larger_leaf_splits_ == nullptr ? -1 : larger_leaf_splits_->leaf_index(),
-                                                use_subtract, UseRDNA2ExactBestSplit())) {
-#ifndef TIMETAG
-        if (config_->feature_fraction >= 1.0 && UseRDNA2ExactBestSplit() && use_subtract &&
-            larger_leaf_splits_ != nullptr &&
-            larger_leaf_splits_->leaf_index() >= 0) {
-          const int smaller_leaf = smaller_leaf_splits_->leaf_index();
-          const int larger_leaf = larger_leaf_splits_->leaf_index();
-          if (histogram_engine_.best_split_pool_histogram_valid(smaller_leaf) &&
-              histogram_engine_.best_split_pool_histogram_valid(larger_leaf)) {
-            const std::vector<int8_t> node_used_features(static_cast<size_t>(num_features_), 1);
-            if (best_split_engine_.PreparePairCandidates(
-                    config_, smaller_leaf_histogram_array_,
-                    histogram_engine_.best_split_pool_histogram(smaller_leaf),
-                    smaller_leaf_splits_->sum_gradients(), smaller_leaf_splits_->sum_hessians(),
-                    smaller_leaf_splits_->num_data_in_leaf(), larger_leaf_histogram_array_,
-                    histogram_engine_.best_split_pool_histogram(larger_leaf),
-                    larger_leaf_splits_->sum_gradients(), larger_leaf_splits_->sum_hessians(),
-                    larger_leaf_splits_->num_data_in_leaf(), is_feature_used, node_used_features,
-                    histogram_engine_.stream())) {
-              histogram_engine_.RecordBestSplitReadyEvent();
-            }
-          }
-        }
-#endif
+                                                use_subtract)) {
 #ifdef TIMETAG
         ++profile_rdna2_histogram_calls_;
 #endif
@@ -117,9 +114,11 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
     SerialTreeLearner::ConstructHistograms(is_feature_used, use_subtract);
   }
 
-  void FindBestSplitsFromHistograms(const std::vector<int8_t>& is_feature_used, bool use_subtract,
-                                     const Tree* tree) override {
+  // Serial owns split selection and the per-feature is_splittable flags used
+  // to prune descendants. GPU top-K rescans do not preserve those flags.
 #ifdef TIMETAG
+  void FindBestSplitsFromHistograms(const std::vector<int8_t>& is_feature_used, bool use_subtract,
+                                    const Tree* tree) override {
     SerialTreeLearner::FindBestSplitsFromHistograms(is_feature_used, use_subtract, tree);
     if (cegb_ == nullptr && best_split_engine_.eligible() &&
         config_->feature_fraction_bynode >= 1.0 && config_->interaction_constraints.empty()) {
@@ -149,85 +148,34 @@ class RDNA2TreeLearner final : public SerialTreeLearner {
         }
       }
     }
-#else
-    if (TryFindBestSplitsRDNA2Exact(is_feature_used, use_subtract, tree)) {
-      return;
-    }
-    SerialTreeLearner::FindBestSplitsFromHistograms(is_feature_used, use_subtract, tree);
+  }
 #endif
-  }
-
-  bool UseRDNA2ExactBestSplit() const {
-#ifdef TIMETAG
-    return false;
-#else
-    return !config_->use_quantized_grad && histogram_engine_.h128_eligible() &&
-        !histogram_engine_.h64_eligible() && histogram_engine_.best_split_pool_enabled() &&
-        best_split_engine_.eligible() && cegb_ == nullptr &&
-        config_->feature_fraction_bynode >= 1.0 && config_->interaction_constraints.empty() &&
-        !config_->extra_trees && config_->monotone_constraints.empty() && config_->feature_contri.empty() &&
-        config_->max_delta_step <= 0.0 && config_->path_smooth <= kEpsilon;
-#endif
-  }
-
-  bool TryFindBestSplitsRDNA2Exact(const std::vector<int8_t>& is_feature_used, bool use_subtract,
-                                   const Tree* tree) {
-    if (!UseRDNA2ExactBestSplit()) {
-      return false;
-    }
-    if (smaller_leaf_splits_ == nullptr || smaller_leaf_splits_->leaf_index() < 0) {
-      return false;
-    }
-    const int smaller_leaf = smaller_leaf_splits_->leaf_index();
-    if (!histogram_engine_.best_split_pool_histogram_valid(smaller_leaf)) {
-      return false;
-    }
-    const bool has_larger = larger_leaf_splits_ != nullptr && larger_leaf_splits_->leaf_index() >= 0;
-    if (has_larger && !use_subtract) {
-      return false;
-    }
-    if (has_larger && !histogram_engine_.best_split_pool_histogram_valid(larger_leaf_splits_->leaf_index())) {
-      return false;
-    }
-
-    const std::vector<int8_t> node_used_features(static_cast<size_t>(num_features_), 1);
-    if (has_larger) {
-      const int larger_leaf = larger_leaf_splits_->leaf_index();
-      SplitInfo smaller_best;
-      SplitInfo larger_best;
-      if (!best_split_engine_.FindBestDeviceExactPair(
-              config_, smaller_leaf_histogram_array_,
-              histogram_engine_.best_split_pool_histogram(smaller_leaf),
-              smaller_leaf_splits_->sum_gradients(), smaller_leaf_splits_->sum_hessians(),
-              smaller_leaf_splits_->num_data_in_leaf(), GetParentOutput(tree, smaller_leaf_splits_.get()),
-              &smaller_best, larger_leaf_histogram_array_,
-              histogram_engine_.best_split_pool_histogram(larger_leaf),
-              larger_leaf_splits_->sum_gradients(), larger_leaf_splits_->sum_hessians(),
-              larger_leaf_splits_->num_data_in_leaf(), GetParentOutput(tree, larger_leaf_splits_.get()),
-              &larger_best, is_feature_used, node_used_features, histogram_engine_.best_split_ready_event())) {
-        return false;
-      }
-      best_split_per_leaf_[smaller_leaf] = smaller_best;
-      best_split_per_leaf_[larger_leaf] = larger_best;
-    } else {
-      SplitInfo smaller_best;
-      if (!best_split_engine_.FindBestDeviceExact(
-              config_, smaller_leaf_histogram_array_,
-              histogram_engine_.best_split_pool_histogram(smaller_leaf), is_feature_used, node_used_features,
-              smaller_leaf_splits_->sum_gradients(), smaller_leaf_splits_->sum_hessians(),
-              smaller_leaf_splits_->num_data_in_leaf(), GetParentOutput(tree, smaller_leaf_splits_.get()),
-              histogram_engine_.best_split_ready_event(), &smaller_best)) {
-        return false;
-      }
-      best_split_per_leaf_[smaller_leaf] = smaller_best;
-    }
-    return true;
-  }
 
  private:
-  RDNA2HistogramEngine histogram_engine_;
-  RDNA2BestSplitEngine best_split_engine_;
+  static int DeviceId(const Config& config) {
+    return config.gpu_device_id < 0 ? 0 : config.gpu_device_id;
+  }
+
+  void InitEngines() {
+    const int device = DeviceId(*config_);
+    int shadow_pool_leaves = 0;
 #ifdef TIMETAG
+    if (histogram_pool_.HasFullCapacity()) {
+      shadow_pool_leaves = config_->num_leaves;
+    }
+#endif
+    histogram_engine_.Init(train_data_, device, shadow_pool_leaves);
+    histogram_engine_.RegisterDataIndices(data_partition_->indices(), static_cast<size_t>(num_data_));
+#ifdef TIMETAG
+    if (histogram_engine_.best_split_pool_enabled()) {
+      best_split_engine_.Init(train_data_, device);
+    }
+#endif
+  }
+
+  RDNA2HistogramEngine histogram_engine_;
+#ifdef TIMETAG
+  RDNA2BestSplitEngine best_split_engine_;
   uint64_t profile_histogram_dispatch_calls_ = 0;
   uint64_t profile_rdna2_histogram_calls_ = 0;
   uint64_t profile_serial_fallback_calls_ = 0;

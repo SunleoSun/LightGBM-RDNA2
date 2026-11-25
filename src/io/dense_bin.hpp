@@ -85,7 +85,8 @@ class DenseBin : public Bin {
   bool LoadSingleFeatureCanonicalBinRange(const uint8_t* canonical_bins, data_size_t row_start,
                                           data_size_t row_count, uint32_t most_freq_bin,
                                           uint32_t bin_offset) override {
-    if (canonical_bins == nullptr || row_start < 0 || row_count < 0 || row_start + row_count > num_data_) {
+    if (canonical_bins == nullptr || row_start < 0 || row_start > num_data_ ||
+        row_count < 0 || row_count > num_data_ - row_start) {
       return false;
     }
     auto encode = [most_freq_bin, bin_offset](uint32_t bin) {

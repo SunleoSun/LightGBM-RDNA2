@@ -841,6 +841,11 @@ class Dataset {
     return feature_groups_[group]->FeatureGroupIterator();
   }
 
+  inline bool IsDenseSingleFeatureGroup(int group) const {
+    const auto& feature_group = feature_groups_[group];
+    return feature_group->num_feature_ == 1 && !feature_group->is_multi_val_ && !feature_group->is_sparse_;
+  }
+
   inline bool IsMultiGroup(int i) const {
     return feature_groups_[i]->is_multi_val_;
   }

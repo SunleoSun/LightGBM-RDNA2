@@ -277,13 +277,13 @@ __global__ void RDNA2SplitHistogramPoolKernel(const hist_t* parent_histogram,
 
 void RDNA2HistogramEngine::BeforeTrain(const score_t* gradients, const score_t* hessians) {
   std::fill(best_split_pool_valid_.begin(), best_split_pool_valid_.end(), static_cast<uint8_t>(0));
-  best_split_device_histogram_valid_ = false;
-  if ((!h64_eligible_ && !h128_eligible_) || gradients == nullptr || hessians == nullptr) {
+  if (!h128_eligible_ || gradients == nullptr || hessians == nullptr) {
     return;
   }
 #ifdef TIMETAG
   const auto profile_start = std::chrono::steady_clock::now();
 #endif
+  pending_uploads_ = true;
   CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(device_gradients(), gradients,
                                        static_cast<size_t>(num_data_) * sizeof(score_t),
                                        cudaMemcpyHostToDevice, stream()));
@@ -300,13 +300,13 @@ void RDNA2HistogramEngine::BeforeTrain(const score_t* gradients, const score_t* 
 
 bool RDNA2HistogramEngine::ConstructHistogram(
     const std::vector<int8_t>& is_feature_used, const data_size_t* data_indices,
-    data_size_t num_data, hist_t* host_histogram, int smaller_leaf, int larger_leaf, bool use_subtract,
-    bool prefer_device_only) {
-  if ((!h64_eligible_ && !h128_eligible_) || host_histogram == nullptr || num_data <= 0 ||
+    data_size_t num_data, hist_t* host_histogram, int smaller_leaf, int larger_leaf, bool use_subtract) {
+  if (!h128_eligible_ || host_histogram == nullptr || num_data <= 0 ||
       is_feature_used.size() != static_cast<size_t>(num_features_)) {
     return false;
   }
-  best_split_device_histogram_valid_ = false;
+  CHECK_LE(num_data, num_data_);
+  CHECK(num_data == num_data_ || data_indices != nullptr);
 #ifdef TIMETAG
   double index_h2d_ms = 0.0;
   double memset_ms = 0.0;
@@ -346,6 +346,7 @@ bool RDNA2HistogramEngine::ConstructHistogram(
       ++profile_index_fallback_copies_;
       const auto index_start = std::chrono::steady_clock::now();
 #endif
+      pending_uploads_ = true;
       CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(device_data_indices(), data_indices,
                                            static_cast<size_t>(num_data) * sizeof(data_size_t),
                                            cudaMemcpyHostToDevice, stream()));
@@ -363,20 +364,19 @@ bool RDNA2HistogramEngine::ConstructHistogram(
 #endif
 
   const int parent_leaf = larger_leaf >= 0 ? std::min(smaller_leaf, larger_leaf) : -1;
-  const bool can_keep_device_only = prefer_device_only && !h64_eligible_ && h128_eligible_ &&
-      best_split_pool_max_leaves_ > 0 && smaller_leaf >= 0 && smaller_leaf < best_split_pool_max_leaves_ &&
-      (larger_leaf < 0 || (use_subtract && larger_leaf < best_split_pool_max_leaves_ &&
-       parent_leaf >= 0 && best_split_pool_valid_[static_cast<size_t>(parent_leaf)] != 0));
-  if (prefer_device_only) {
-    CHECK(can_keep_device_only);
-  }
-  hist_t* mapped_histogram = can_keep_device_only ? nullptr : EnsureCanonicalHistogramMapped(host_histogram);
+  hist_t* mapped_histogram = EnsureCanonicalHistogramMapped(host_histogram);
   hist_t* kernel_histogram = mapped_histogram != nullptr ? mapped_histogram : device_histogram();
   hist_t* mirror_histogram = nullptr;
-  if (!can_keep_device_only && !h64_eligible_ && h128_eligible_ && mapped_histogram != nullptr) {
+  if (best_split_pool_enabled() && mapped_histogram != nullptr) {
     mirror_histogram = device_histogram();
   }
-  const int num_groups = static_cast<int>(dense_feature_groups_.size());
+  // The pool and staging readback consume whole histograms. Initialize inactive
+  // device bins without overwriting inactive bins in the mapped CPU pool.
+  if ((best_split_pool_enabled() || mapped_histogram == nullptr) &&
+      std::find(is_feature_used.begin(), is_feature_used.end(), 0) != is_feature_used.end()) {
+    CUDASUCCESS_OR_FATAL(cudaMemsetAsync(device_histogram(), 0, num_total_bins_ * 2 * sizeof(hist_t), stream()));
+  }
+  const int num_groups = static_cast<int>(host_group_feature_indices_.size());
   const dim3 block(kHistogramThreads);
   constexpr int kH64SuperTileTuples = 2;
   constexpr data_size_t kH64SuperTileMinRows = 12288;
@@ -423,9 +423,9 @@ bool RDNA2HistogramEngine::ConstructHistogram(
           feature4_masks(), num_data_, num_data, num_groups, kernel_histogram, mirror_histogram);
     }
   }
+  CUDASUCCESS_OR_FATAL(cudaGetLastError());
   const bool current_device_histogram_valid = !h64_eligible_ && h128_eligible_ &&
       (mirror_histogram != nullptr || kernel_histogram == device_histogram());
-  best_split_device_histogram_valid_ = current_device_histogram_valid;
   if (current_device_histogram_valid && best_split_pool_max_leaves_ > 0 &&
       smaller_leaf >= 0 && smaller_leaf < best_split_pool_max_leaves_) {
     const size_t histogram_values = num_total_bins_ * 2;
@@ -453,18 +453,15 @@ bool RDNA2HistogramEngine::ConstructHistogram(
       }
     }
   }
-  if (can_keep_device_only) {
-    CUDASUCCESS_OR_FATAL(cudaEventRecord(best_split_ready_event_, stream()));
-  } else {
-    SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
-  }
+  SynchronizeCUDAStream(stream(), __FILE__, __LINE__);
+  MarkUploadsComplete();
 #ifdef TIMETAG
   auto stage_end = std::chrono::steady_clock::now();
   kernel_ms = std::chrono::duration<double, std::milli>(stage_end - stage_start).count();
   stage_start = std::chrono::steady_clock::now();
 #endif
   double host_copy_ms = 0.0;
-  if (mapped_histogram == nullptr && !can_keep_device_only) {
+  if (mapped_histogram == nullptr) {
     CopyFromCUDADeviceToHostAsync(host_histogram_staging(), device_histogram(), num_total_bins_ * 2,
                                   stream(), __FILE__, __LINE__);
     SynchronizeCUDAStream(stream(), __FILE__, __LINE__);

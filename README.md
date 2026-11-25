@@ -5,9 +5,11 @@ Experimental LightGBM fork optimized for **native Windows ROCm/HIP training on A
 The project is based on LightGBM 4.7.0 semantics and treats pristine upstream **LightGBM v4.7.0 CPU as the correctness oracle**. RDNA2-specific code is accepted only when it preserves canonical Dataset/binning rules, tree structure, and predictions within the strict benchmark contract.
 
 > [!IMPORTANT]
-> The current H64/H128 RDNA2 path passes the strict CPU-v4.7 correctness matrix for the production profiles covered by this repository, including binary classification, L2 regression, feature-fraction coverage, Optuna-shaped profiles, long-horizon runs, and quantile regression at `alpha=0.1/0.5/0.9`. This remains an experimental fork rather than an official LightGBM distribution.
+> H64 and H128 build eligible histograms on RDNA2. The canonical CPU split finder evaluates all eligible features and preserves parent-to-child pruning. The former H128 top-2 shortcut was disabled after it was found to change tree structure on smaller inputs. This remains an experimental fork rather than an official LightGBM distribution.
 
-## Headline results
+## Historical headline results
+
+The H128 results below include the former GPU top-2 selector and do not represent the current CPU split path.
 
 Production benchmark shape: **40,000 training rows × 3,000 float32 features, 100 trees**, Ryzen 9 5950X + RX 6800 XT.
 
@@ -62,11 +64,8 @@ The RDNA2 learner keeps LightGBM's canonical ownership boundaries and specialize
 - adaptive H64 eight-feature SuperTile for large leaves;
 - compile-time direct-row versus indexed-row specialization;
 - LDS structure-of-arrays layout and H128-specific bank-phase padding;
-- H128 one-step input prefetch;
-- H128 device-resident canonical histogram pool with parent-minus-smaller subtraction;
-- batched H128 pair best-split work and event handoff;
-- H128 GPU top-2 nomination only as a candidate reducer, with CPU `Dataset::FixHistogram` + canonical `FeatureHistogram::FindBestThreshold` retaining final split authority;
-- pinned activity-mask staging and a read-only H128 nomination scheduling sidecar for supported full-feature shapes.
+- H128 one-step input prefetch and pinned activity-mask staging;
+- canonical Serial histogram subtraction, split selection, and descendant feature pruning for both H64 and H128.
 
 Several ideas were measured and rejected rather than kept just because they were more GPU-heavy: H64 finite top-K nomination, H128 top-1, larger H128 nomination counts, two-bank H128 layouts, direct in-place histogram/nomination fusion, feature-level CPU/GPU overlap, and other variants that either regressed wall time or broke long-horizon correctness.
 

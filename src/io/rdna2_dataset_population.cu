@@ -95,7 +95,12 @@ class RDNA2DatasetPopulationContext {
  public:
   ~RDNA2DatasetPopulationContext() { Release(); }
 
-  void Ensure(size_t input_elems, size_t output_elems, size_t bounds_elems, size_t feature_count) {
+  void Ensure(int device, size_t input_elems, size_t output_elems, size_t bounds_elems, size_t feature_count) {
+    if (device_ != device) {
+      Release();
+      SetCUDADevice(device, __FILE__, __LINE__);
+      device_ = device;
+    }
     for (int slot = 0; slot < kPopulationPipelineSlots; ++slot) {
       if (streams_[slot] == nullptr) {
         CUDASUCCESS_OR_FATAL(cudaStreamCreate(&streams_[slot]));
@@ -103,8 +108,8 @@ class RDNA2DatasetPopulationContext {
     }
     if (input_elems > input_capacity_) {
       for (int slot = 0; slot < kPopulationPipelineSlots; ++slot) {
-        if (host_inputs_[slot] != nullptr) CUDASUCCESS_OR_FATAL(cudaFreeHost(host_inputs_[slot]));
-        if (device_inputs_[slot] != nullptr) CUDASUCCESS_OR_FATAL(cudaFree(device_inputs_[slot]));
+        Free(host_inputs_[slot], cudaFreeHost);
+        Free(device_inputs_[slot], cudaFree);
         CUDASUCCESS_OR_FATAL(cudaHostAlloc(reinterpret_cast<void**>(&host_inputs_[slot]),
                                            input_elems * sizeof(float), cudaHostAllocPortable));
         CUDASUCCESS_OR_FATAL(cudaMalloc(reinterpret_cast<void**>(&device_inputs_[slot]),
@@ -114,8 +119,8 @@ class RDNA2DatasetPopulationContext {
     }
     if (output_elems > output_capacity_) {
       for (int slot = 0; slot < kPopulationPipelineSlots; ++slot) {
-        if (host_outputs_[slot] != nullptr) CUDASUCCESS_OR_FATAL(cudaFreeHost(host_outputs_[slot]));
-        if (device_outputs_[slot] != nullptr) CUDASUCCESS_OR_FATAL(cudaFree(device_outputs_[slot]));
+        Free(host_outputs_[slot], cudaFreeHost);
+        Free(device_outputs_[slot], cudaFree);
         CUDASUCCESS_OR_FATAL(cudaHostAlloc(reinterpret_cast<void**>(&host_outputs_[slot]),
                                            output_elems * sizeof(uint8_t), cudaHostAllocPortable));
         CUDASUCCESS_OR_FATAL(cudaMalloc(reinterpret_cast<void**>(&device_outputs_[slot]),
@@ -124,14 +129,14 @@ class RDNA2DatasetPopulationContext {
       output_capacity_ = output_elems;
     }
     if (bounds_elems > bounds_capacity_) {
-      if (device_upper_bounds_ != nullptr) CUDASUCCESS_OR_FATAL(cudaFree(device_upper_bounds_));
+      Free(device_upper_bounds_, cudaFree);
       CUDASUCCESS_OR_FATAL(cudaMalloc(reinterpret_cast<void**>(&device_upper_bounds_),
                                       bounds_elems * sizeof(double)));
       bounds_capacity_ = bounds_elems;
     }
     if (feature_count > feature_capacity_) {
-      if (device_num_bins_ != nullptr) CUDASUCCESS_OR_FATAL(cudaFree(device_num_bins_));
-      if (device_missing_nan_ != nullptr) CUDASUCCESS_OR_FATAL(cudaFree(device_missing_nan_));
+      Free(device_num_bins_, cudaFree);
+      Free(device_missing_nan_, cudaFree);
       CUDASUCCESS_OR_FATAL(cudaMalloc(reinterpret_cast<void**>(&device_num_bins_),
                                       feature_count * sizeof(uint16_t)));
       CUDASUCCESS_OR_FATAL(cudaMalloc(reinterpret_cast<void**>(&device_missing_nan_),
@@ -140,7 +145,17 @@ class RDNA2DatasetPopulationContext {
     }
   }
 
-  void Release() {
+  // Also runs on error, before the mutex or caller-owned input is released.
+  // Drain both streams, even if one reports an execution error.
+  void Release() noexcept {
+    if (device_ < 0) {
+      return;
+    }
+    int previous = -1;
+    cudaGetDevice(&previous);
+    if (previous != device_) {
+      cudaSetDevice(device_);
+    }
     for (int slot = 0; slot < kPopulationPipelineSlots; ++slot) {
       if (streams_[slot] != nullptr) { cudaStreamSynchronize(streams_[slot]); }
     }
@@ -166,8 +181,21 @@ class RDNA2DatasetPopulationContext {
     output_capacity_ = 0;
     bounds_capacity_ = 0;
     feature_capacity_ = 0;
+    if (previous >= 0 && previous != device_) {
+      cudaSetDevice(previous);
+    }
+    device_ = -1;
   }
 
+  template <typename T, typename FreeFn>
+  static void Free(T*& ptr, FreeFn free_fn) {
+    if (ptr != nullptr) {
+      CUDASUCCESS_OR_FATAL(free_fn(ptr));
+      ptr = nullptr;
+    }
+  }
+
+  int device_ = -1;
   std::mutex mutex_;
   std::array<cudaStream_t, kPopulationPipelineSlots> streams_{};
   std::array<float*, kPopulationPipelineSlots> host_inputs_{};
@@ -183,6 +211,21 @@ class RDNA2DatasetPopulationContext {
   size_t feature_capacity_ = 0;
 };
 
+class PopulationOperation {
+ public:
+  explicit PopulationOperation(RDNA2DatasetPopulationContext& context) : context_(context) {}
+  ~PopulationOperation() {
+    if (!complete_) {
+      context_.Release();
+    }
+  }
+  void Complete() { complete_ = true; }
+
+ private:
+  RDNA2DatasetPopulationContext& context_;
+  bool complete_ = false;
+};
+
 RDNA2DatasetPopulationContext& PopulationContext() {
   static RDNA2DatasetPopulationContext context;
   return context;
@@ -190,7 +233,7 @@ RDNA2DatasetPopulationContext& PopulationContext() {
 
 }  // namespace
 
-bool RDNA2DenseFloat32DatasetPopulationNeedsPrepare(int num_rows, int num_cols) {
+bool RDNA2DenseFloat32DatasetPopulationNeedsPrepare(int num_rows, int num_cols, int gpu_device_id) {
   const int chunk_rows = ChooseChunkRows(num_rows, num_cols);
   if (chunk_rows <= 0) {
     return false;
@@ -198,7 +241,8 @@ bool RDNA2DenseFloat32DatasetPopulationNeedsPrepare(int num_rows, int num_cols) 
   const size_t chunk_elems = static_cast<size_t>(chunk_rows) * num_cols;
   auto& context = PopulationContext();
   std::lock_guard<std::mutex> lock(context.mutex_);
-  return context.streams_[0] == nullptr || context.streams_[1] == nullptr ||
+  const int device = gpu_device_id < 0 ? 0 : gpu_device_id;
+  return context.device_ != device || context.streams_[0] == nullptr || context.streams_[1] == nullptr ||
          context.input_capacity_ < chunk_elems ||
          context.output_capacity_ < chunk_elems ||
          context.bounds_capacity_ < static_cast<size_t>(num_cols) * kMaxBins ||
@@ -221,9 +265,11 @@ bool RDNA2PrepareDenseFloat32DatasetPopulation(int num_rows, int num_cols, int g
   const size_t chunk_elems = static_cast<size_t>(chunk_rows) * num_cols;
   auto& context = PopulationContext();
   std::lock_guard<std::mutex> lock(context.mutex_);
-  context.Ensure(chunk_elems, chunk_elems,
+  PopulationOperation operation(context);
+  context.Ensure(device, chunk_elems, chunk_elems,
                  static_cast<size_t>(num_cols) * kMaxBins,
                  static_cast<size_t>(num_cols));
+  operation.Complete();
   return true;
 }
 
@@ -280,7 +326,8 @@ bool RDNA2PopulateDenseFloat32Dataset(Dataset* dataset, const float* data,
   const auto start = std::chrono::steady_clock::now();
   const double metadata_ms = std::chrono::duration<double, std::milli>(metadata_done - function_start).count();
   const double device_check_ms = std::chrono::duration<double, std::milli>(start - metadata_done).count();
-  context.Ensure(input_chunk_elems, output_chunk_elems, upper_bounds.size(), num_bins.size());
+  PopulationOperation operation(context);
+  context.Ensure(device, input_chunk_elems, output_chunk_elems, upper_bounds.size(), num_bins.size());
   CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(context.device_upper_bounds_, upper_bounds.data(),
                                        upper_bounds.size() * sizeof(double), cudaMemcpyHostToDevice, context.streams_[0]));
   CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(context.device_num_bins_, num_bins.data(),
@@ -300,7 +347,7 @@ bool RDNA2PopulateDenseFloat32Dataset(Dataset* dataset, const float* data,
 
   auto finish_slot = [&](int slot) {
     if (pending_row_offsets[slot] < 0) {
-      return true;
+      return;
     }
     const auto wait_begin = std::chrono::steady_clock::now();
     CUDASUCCESS_OR_FATAL(cudaStreamSynchronize(context.streams_[slot]));
@@ -308,21 +355,20 @@ bool RDNA2PopulateDenseFloat32Dataset(Dataset* dataset, const float* data,
     gpu_wait_ms += std::chrono::duration<double, std::milli>(wait_end - wait_begin).count();
 
     const auto load_begin = std::chrono::steady_clock::now();
-    const bool loaded = dataset->LoadDenseFeatureMajorCanonicalBinRange(
-        context.host_outputs_[slot], num_cols, pending_row_offsets[slot], pending_row_counts[slot]);
+    // After any GPU-populated rows have been applied, starting the CPU loader
+    // on the same Dataset is not a safe fallback.
+    CHECK(dataset->LoadDenseFeatureMajorCanonicalBinRange(
+        context.host_outputs_[slot], num_cols, pending_row_offsets[slot], pending_row_counts[slot]));
     const auto load_end = std::chrono::steady_clock::now();
     host_load_ms += std::chrono::duration<double, std::milli>(load_end - load_begin).count();
     pending_row_offsets[slot] = -1;
     pending_row_counts[slot] = 0;
-    return loaded;
   };
 
   int chunk_index = 0;
-  for (int row_offset = 0; row_offset < num_rows; row_offset += chunk_rows, ++chunk_index) {
+  for (int row_offset = 0; row_offset < num_rows; ++chunk_index) {
     const int slot = chunk_index % kPopulationPipelineSlots;
-    if (!finish_slot(slot)) {
-      return false;
-    }
+    finish_slot(slot);
 
     const int this_rows = std::min(chunk_rows, num_rows - row_offset);
     const size_t input_bytes = static_cast<size_t>(this_rows) * num_cols * sizeof(float);
@@ -336,7 +382,7 @@ bool RDNA2PopulateDenseFloat32Dataset(Dataset* dataset, const float* data,
 
     CUDASUCCESS_OR_FATAL(cudaMemcpyAsync(context.device_inputs_[slot], context.host_inputs_[slot],
                                          input_bytes, cudaMemcpyHostToDevice, context.streams_[slot]));
-    const dim3 grid((num_cols + kFeatureTile - 1) / kFeatureTile,
+    const dim3 grid(1 + (num_cols - 1) / kFeatureTile,
                     (this_rows + kRowTile - 1) / kRowTile);
     RDNA2PopulateDenseBinsKernel<<<grid, block, 0, context.streams_[slot]>>>(
         context.device_inputs_[slot], context.device_outputs_[slot], context.device_upper_bounds_,
@@ -346,19 +392,19 @@ bool RDNA2PopulateDenseFloat32Dataset(Dataset* dataset, const float* data,
                                          output_bytes, cudaMemcpyDeviceToHost, context.streams_[slot]));
     pending_row_offsets[slot] = row_offset;
     pending_row_counts[slot] = this_rows;
+    row_offset += this_rows;
   }
 
   for (int slot = 0; slot < kPopulationPipelineSlots; ++slot) {
-    if (!finish_slot(slot)) {
-      return false;
-    }
+    finish_slot(slot);
   }
+  operation.Complete();
 
   const auto end = std::chrono::steady_clock::now();
   const double setup_ms = std::chrono::duration<double, std::milli>(setup_done - start).count();
   const double total_ms = std::chrono::duration<double, std::milli>(end - start).count();
   Log::Info("RDNA2 dataset population: rows=%d features=%d chunk_rows=%d chunks=%d slots=%d metadata=%.3f ms device_check=%.3f ms setup=%.3f ms host_stage=%.3f ms gpu_wait=%.3f ms host_load=%.3f ms total=%.3f ms",
-            num_rows, num_cols, chunk_rows, (num_rows + chunk_rows - 1) / chunk_rows,
+            num_rows, num_cols, chunk_rows, chunk_index,
             kPopulationPipelineSlots, metadata_ms, device_check_ms, setup_ms, host_stage_ms,
             gpu_wait_ms, host_load_ms, total_ms);
   return true;

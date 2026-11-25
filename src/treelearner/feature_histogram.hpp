@@ -1380,6 +1380,8 @@ class HistogramPool {
    */
   ~HistogramPool() {}
 
+  bool HasFullCapacity() const { return is_enough_; }
+
   /*!
    * \brief Reset pool size
    * \param cache_size Max cache size

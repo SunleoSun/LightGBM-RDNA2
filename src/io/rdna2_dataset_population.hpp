@@ -10,7 +10,7 @@
 namespace LightGBM {
 
 #ifdef USE_CUDA
-bool RDNA2DenseFloat32DatasetPopulationNeedsPrepare(int num_rows, int num_cols);
+bool RDNA2DenseFloat32DatasetPopulationNeedsPrepare(int num_rows, int num_cols, int gpu_device_id);
 bool RDNA2PrepareDenseFloat32DatasetPopulation(int num_rows, int num_cols, int gpu_device_id);
 
 bool RDNA2PopulateDenseFloat32Dataset(Dataset* dataset, const float* data,

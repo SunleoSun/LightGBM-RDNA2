@@ -70,6 +70,8 @@ class RDNA2BestSplitEngine {
                         const std::vector<int8_t>& node_used_features,
                         double sum_gradients, double sum_hessians, data_size_t num_data,
                         double parent_output, const SplitInfo& cpu_best, const char* leaf_name);
+  // Research only: exact rescans of nominated features do not reproduce
+  // Serial's complete feature-pruning state. Not a production split finder.
   bool FindBestDeviceExact(const Config* config, FeatureHistogram* histogram_array,
                             const hist_t* device_histogram,
                             const std::vector<int8_t>& is_feature_used,

@@ -26,11 +26,8 @@ The accepted training architecture is correctness-first. RDNA2 changes physical 
 - Exact gfx1030 HIP histogram kernels for H64 and H128.
 - Persistent canonical Feature4 packing: four byte-sized feature groups are packed into one aligned `uint32` representation once per Dataset/learner lifecycle instead of being repacked per tree.
 - Direct histogram readback into the Serial-owned canonical histogram buffer using host registration when available, removing an intermediate staging memcpy.
-- H128 device-resident histogram pool with canonical parent-minus-smaller-child subtraction.
-- Batched H128 pair best-split work and explicit event handoff between histogram completion and selector work.
-- H64 keeps canonical CPU `FeatureHistogram::FindBestThreshold` split authority. Finite GPU top-K nomination was tested but did not deliver a strict-correctness speedup.
-- H128 uses GPU approximate top-2 nomination only as a candidate reducer; compact nominated slices are finalized by CPU `Dataset::FixHistogram` and canonical `FeatureHistogram::FindBestThreshold`. CPU remains the final `SplitInfo` authority.
-- Pinned Feature4 activity-mask staging and a read-only H128 nomination scheduling sidecar for the supported full-feature path.
+- Canonical CPU histogram subtraction, split selection and descendant feature pruning for both H64 and H128. The former H128 top-2 nomination path did not preserve the per-feature state needed by child leaves, so it is not used for training decisions.
+- Pinned Feature4 activity-mask staging.
 - Unsupported semantics, including shapes that cannot preserve the canonical contract, fall back to the Serial path rather than silently changing results.
 
 Several experiments were deliberately rejected after measurement: H128 top-1 nomination diverged over longer horizons, larger nomination counts lost the speedup, H64 finite top-K did not improve strict-correctness wall time, two-bank H128 was slower, and direct in-place/fused histogram ownership variants either slowed the workload or broke canonical correctness.
@@ -54,9 +51,9 @@ Dataset creation was originally the dominant pre-train bottleneck and transient-
 
 The resulting production H64/H128 serialized Datasets are SHA-256 identical to pristine v4.7. Additional byte-identical probes cover zeros/NaNs, sparse data exercising EFB fallback, categorical features including negative-to-missing handling, and Dataset construction from a reference Dataset.
 
-## Production results — 40k x 3000, 100 trees
+## Historical production results — 40k x 3000, 100 trees
 
-The following measurements were regenerated on 2026-08-12 after the final Dataset-population pipeline was accepted. `end_to_end` here is the training-process path through Dataset/binary load, learner initialization, and boosting; prediction is measured separately. Memory is **peak host process working set**, not GPU VRAM.
+These 2026-08-12 measurements predate the H128 split-pruning fix and do not represent the current H128 training path. `end_to_end` here is the training-process path through Dataset/binary load, learner initialization, and boosting; prediction is measured separately. Memory is **peak host process working set**, not GPU VRAM.
 
 | Profile | Backend | End-to-end (s) | Speedup vs v4.7 CPU | Peak host WS (MiB) | Iteration (ms) |
 |---|---|---:|---:|---:|---:|
